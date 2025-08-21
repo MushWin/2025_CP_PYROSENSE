@@ -45,27 +45,45 @@ HTML_TEMPLATE = """
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PyroSense Dashboard - Python Edition</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
+    * {
       margin: 0;
       padding: 0;
-      background-color: #f0e6d2;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-image: url('/static/login background.jpg');
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+      background-attachment: fixed;
       color: #333;
+      min-height: 100vh;
+    }
+    
+    .dashboard-overlay {
+      background: rgba(255, 255, 255, 0.95);
+      backdrop-filter: blur(10px);
+      min-height: 100vh;
     }
     
     .dashboard-title {
-      padding: 10px 20px;
-      background: #333;
+      padding: 12px 20px;
+      background: linear-gradient(135deg, #4a5568 0%, #2d3748 100%);
       color: #fff;
       font-size: 14px;
-      font-weight: normal;
+      font-weight: 600;
+      letter-spacing: 1px;
+      text-align: center;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
     
     header {
-      background: linear-gradient(90deg, #d62828, #e63946);
+      background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 50%, #ffeb3b 100%);
       color: white;
-      padding: 15px 20px;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      padding: 20px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.2);
       position: relative;
     }
     
@@ -80,19 +98,21 @@ HTML_TEMPLATE = """
     .header-left {
       display: flex;
       align-items: center;
-      gap: 15px;
+      gap: 20px;
     }
     
     .header-logo {
-      width: 45px;
-      height: 45px;
-      background: white;
-      border-radius: 10px;
+      width: 50px;
+      height: 50px;
+      background: rgba(255, 255, 255, 0.2);
+      backdrop-filter: blur(10px);
+      border-radius: 15px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 1.8rem;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      font-size: 2rem;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+      border: 2px solid rgba(255, 255, 255, 0.3);
     }
     
     .header-title-section {
@@ -101,15 +121,16 @@ HTML_TEMPLATE = """
     
     .header-title {
       margin: 0;
-      font-size: 1.5rem;
+      font-size: 2rem;
       font-weight: 700;
-      letter-spacing: -0.5px;
+      letter-spacing: -1px;
       color: white;
+      text-shadow: 0 2px 4px rgba(0,0,0,0.3);
     }
     
     .header-subtitle {
       margin: 0;
-      font-size: 0.8rem;
+      font-size: 0.9rem;
       opacity: 0.9;
       font-weight: 300;
     }
@@ -117,14 +138,17 @@ HTML_TEMPLATE = """
     .header-right {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 15px;
     }
     
     .badge {
-      padding: 5px 10px;
-      border-radius: 20px;
-      font-size: 0.75rem;
+      padding: 8px 16px;
+      border-radius: 25px;
+      font-size: 0.8rem;
       display: inline-block;
+      font-weight: 600;
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.3);
     }
     
     .python-badge {
@@ -133,19 +157,22 @@ HTML_TEMPLATE = """
     }
     
     .system-badge {
-      background: #4CAF50;
+      background: rgba(76, 175, 80, 0.3);
       color: white;
     }
     
     .history-button, .logout-button {
-      padding: 5px 15px;
-      border-radius: 20px;
-      font-size: 0.8rem;
+      padding: 8px 20px;
+      border-radius: 25px;
+      font-size: 0.85rem;
       text-decoration: none;
       display: inline-flex;
       align-items: center;
-      gap: 5px;
-      transition: all 0.2s ease;
+      gap: 8px;
+      transition: all 0.3s ease;
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      font-weight: 600;
     }
     
     .history-button {
@@ -154,12 +181,14 @@ HTML_TEMPLATE = """
     }
     
     .logout-button {
-      background: rgba(255,255,255,0.2);
+      background: rgba(214, 40, 40, 0.3);
       color: white;
     }
     
     .history-button:hover, .logout-button:hover {
       background: rgba(255,255,255,0.3);
+      transform: translateY(-2px);
+      box-shadow: 0 4px 15px rgba(0,0,0,0.2);
     }
     
     main {
@@ -167,168 +196,209 @@ HTML_TEMPLATE = """
       margin: 0 auto;
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 20px;
-      padding: 20px;
+      gap: 25px;
+      padding: 30px 20px;
     }
     
     .card {
-      background: white;
-      border-radius: 15px;
+      background: rgba(255, 255, 255, 0.95);
+      backdrop-filter: blur(15px);
+      border-radius: 20px;
       overflow: hidden;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }
+    
+    .card:hover {
+      transform: translateY(-5px);
+      box-shadow: 0 15px 35px rgba(0,0,0,0.2);
     }
     
     .card-header {
       display: flex;
       align-items: center;
-      gap: 10px;
-      padding: 15px;
-      background: #f8f8f8;
-      border-bottom: 1px solid #eee;
+      gap: 12px;
+      padding: 20px;
+      background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+      border-bottom: 1px solid rgba(0,0,0,0.1);
     }
     
     .card-icon {
-      width: 24px;
-      height: 24px;
+      width: 28px;
+      height: 28px;
       display: flex;
       align-items: center;
       justify-content: center;
-      opacity: 0.7;
+      opacity: 0.8;
+      font-size: 1.2rem;
     }
     
     .card-title {
       margin: 0;
-      font-size: 1.1rem;
-      font-weight: 600;
-      color: #333;
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: #2d3748;
     }
     
     .card-content {
-      padding: 15px;
+      padding: 25px;
+      text-align: center;
     }
     
     .video-feed {
       width: 100%;
-      height: 150px;
-      border-radius: 8px;
-      background: #666;
+      height: 180px;
+      border-radius: 15px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       display: flex;
       align-items: center;
       justify-content: center;
       color: white;
-      font-size: 0.9rem;
-      margin-bottom: 15px;
+      font-size: 1rem;
+      margin-bottom: 20px;
       text-align: center;
+      font-weight: 600;
+      box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
     }
     
     .status-line {
       display: flex;
-      margin-bottom: 15px;
-      font-size: 0.9rem;
+      justify-content: center;
+      margin-bottom: 20px;
+      font-size: 1rem;
       align-items: center;
+      gap: 8px;
     }
     
     .status-label {
-      margin-right: 5px;
+      font-weight: 600;
+      color: #4a5568;
     }
     
     .button-group {
       display: flex;
-      gap: 8px;
+      gap: 12px;
       flex-wrap: wrap;
       justify-content: center;
     }
     
     .action-button {
-      background: #f77f00;
+      background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 50%, #ffeb3b 100%);
       color: white;
       border: none;
-      padding: 8px 15px;
-      border-radius: 20px;
-      font-size: 0.8rem;
+      padding: 10px 18px;
+      border-radius: 25px;
+      font-size: 0.85rem;
       cursor: pointer;
       display: flex;
       align-items: center;
-      gap: 5px;
-      transition: all 0.2s ease;
+      gap: 6px;
+      transition: all 0.3s ease;
+      font-weight: 600;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+      box-shadow: 0 4px 15px rgba(255, 107, 107, 0.3);
     }
     
     .action-button:hover {
-      background: #e67300;
-      transform: translateY(-1px);
-      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 25px rgba(255, 107, 107, 0.4);
+      background: linear-gradient(135deg, #ff5252 0%, #ff9500 50%, #fdd835 100%);
     }
     
     .action-button.red {
-      background: #d62828;
+      background: linear-gradient(135deg, #d62828 0%, #f77f00 100%);
+      box-shadow: 0 4px 15px rgba(214, 40, 40, 0.3);
     }
     
     .action-button.red:hover {
-      background: #c52222;
+      background: linear-gradient(135deg, #c52222 0%, #e67300 100%);
+      box-shadow: 0 8px 25px rgba(214, 40, 40, 0.4);
     }
     
     .action-button.green {
-      background: #4CAF50;
+      background: linear-gradient(135deg, #4CAF50 0%, #66bb6a 100%);
+      box-shadow: 0 4px 15px rgba(76, 175, 80, 0.3);
     }
     
     .action-button.green:hover {
-      background: #43a047;
+      background: linear-gradient(135deg, #43a047 0%, #5cb85c 100%);
+      box-shadow: 0 8px 25px rgba(76, 175, 80, 0.4);
     }
     
     .temperature-display {
-      font-size: 2.5rem;
-      font-weight: bold;
-      color: #d62828;
+      font-size: 3rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
       text-align: center;
-      margin: 10px 0;
+      margin: 15px 0;
+      text-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
     
     .slider-container {
-      padding: 0 10px;
-      margin: 15px 0;
+      padding: 0 15px;
+      margin: 20px 0;
     }
     
     .slider {
       -webkit-appearance: none;
       width: 100%;
-      height: 8px;
-      background: linear-gradient(to right, green, yellow, red);
-      border-radius: 4px;
+      height: 10px;
+      background: linear-gradient(to right, #4CAF50, #ffeb3b, #ff6b6b);
+      border-radius: 8px;
       cursor: pointer;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
     }
     
     .slider::-webkit-slider-thumb {
       -webkit-appearance: none;
-      width: 18px;
-      height: 18px;
-      background: #d62828;
+      width: 24px;
+      height: 24px;
+      background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 100%);
       border-radius: 50%;
-      border: 2px solid white;
+      border: 3px solid white;
       cursor: pointer;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+      transition: all 0.3s ease;
+    }
+    
+    .slider::-webkit-slider-thumb:hover {
+      transform: scale(1.1);
+      box-shadow: 0 6px 20px rgba(0,0,0,0.3);
     }
     
     .threshold-info {
-      font-size: 0.95rem;
-      margin-bottom: 15px;
+      font-size: 1rem;
+      margin-bottom: 20px;
       text-align: center;
+      font-weight: 600;
+      color: #4a5568;
     }
     
     .log-container {
-      border: 1px solid #eee;
-      border-radius: 8px;
-      height: 150px;
+      border: 1px solid rgba(0,0,0,0.1);
+      border-radius: 15px;
+      height: 180px;
       overflow-y: auto;
-      font-family: monospace;
+      font-family: 'Consolas', 'Monaco', monospace;
       font-size: 0.85rem;
-      background: #f9f9f9;
-      margin-bottom: 15px;
+      background: rgba(248, 249, 250, 0.8);
+      margin-bottom: 20px;
+      backdrop-filter: blur(10px);
     }
     
     .log-entry {
-      padding: 6px 10px;
-      border-bottom: 1px solid #eee;
-      line-height: 1.3;
+      padding: 8px 15px;
+      border-bottom: 1px solid rgba(0,0,0,0.05);
+      line-height: 1.4;
+      transition: background-color 0.2s ease;
+    }
+    
+    .log-entry:hover {
+      background-color: rgba(255, 255, 255, 0.5);
     }
     
     .log-entry:last-child {
@@ -336,16 +406,24 @@ HTML_TEMPLATE = """
     }
     
     .alert-panel {
-      background: linear-gradient(135deg, #ff6b6b, #feca57);
+      background: linear-gradient(135deg, #ff6b6b, #ffa500);
       color: white;
-      padding: 15px;
-      border-radius: 8px;
+      padding: 20px;
+      border-radius: 15px;
       text-align: center;
-      font-weight: bold;
-      margin-bottom: 15px;
+      font-weight: 700;
+      margin-bottom: 20px;
       display: none;
-      font-size: 1.1rem;
-      box-shadow: 0 2px 5px rgba(255,107,107,0.3);
+      font-size: 1.2rem;
+      box-shadow: 0 8px 25px rgba(255,107,107,0.4);
+      text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+      animation: pulse 2s infinite;
+    }
+    
+    @keyframes pulse {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.02); }
+      100% { transform: scale(1); }
     }
     
     .alert-panel.active {
@@ -355,260 +433,293 @@ HTML_TEMPLATE = """
     .device-status-list {
       list-style: none;
       padding: 0;
-      margin: 0 0 15px 0;
-    }
-    
-    .device-status-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 10px 5px;
-      border-bottom: 1px solid #eee;
-    }
-    
-    .device-status-item:last-child {
-      border-bottom: none;
-    }
-    
-    .status-indicator {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      display: inline-block;
-      margin-right: 10px;
-    }
-    
-    .status-indicator.green {
-      background: #4CAF50;
-    }
-    
-    .status-value {
-      color: #4CAF50;
-      font-weight: 500;
-    }
-    
-    .status-value.ok {
-      color: #4CAF50;
-    }
-    
-    .status-value.running {
-      color: #4CAF50;
-    }
-    
-    .status-value.connected {
-      color: #4CAF50;
+      margin: 0 0 20px 0;
     }
     
     .device-row {
       display: flex;
       justify-content: space-between;
-      margin-bottom: 10px;
-      padding: 6px 8px;
-      border-radius: 5px;
-      transition: background-color 0.2s;
+      align-items: center;
+      margin-bottom: 15px;
+      padding: 12px 15px;
+      border-radius: 12px;
+      transition: all 0.3s ease;
+      background: rgba(248, 249, 250, 0.8);
+      backdrop-filter: blur(10px);
     }
     
     .device-row:hover {
-      background-color: #f5f5f5;
+      background: rgba(255, 255, 255, 0.9);
+      transform: translateX(5px);
+      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
     }
     
     .device-name {
       display: flex;
       align-items: center;
-      font-weight: 500;
+      font-weight: 600;
+      color: #2d3748;
+    }
+    
+    .status-indicator {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 12px;
+      box-shadow: 0 2px 8px rgba(76, 175, 80, 0.3);
+    }
+    
+    .status-indicator.green {
+      background: linear-gradient(135deg, #4CAF50 0%, #66bb6a 100%);
+    }
+    
+    .status-value {
+      font-weight: 600;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 0.85rem;
+    }
+    
+    .status-value.ok, .status-value.running, .status-value.connected {
+      background: linear-gradient(135deg, rgba(76, 175, 80, 0.2) 0%, rgba(102, 187, 106, 0.2) 100%);
+      color: #2e7d32;
     }
     
     footer {
       text-align: center;
-      padding: 15px;
-      font-size: 0.8rem;
-      color: #777;
-      border-top: 1px solid #eee;
-      background: transparent;
-      margin-top: 10px;
+      padding: 20px;
+      font-size: 0.85rem;
+      color: #6c757d;
+      background: rgba(255, 255, 255, 0.8);
+      backdrop-filter: blur(10px);
+      margin-top: 20px;
+      font-weight: 500;
     }
     
-    /* Fix excessive white space */
-    p { margin: 0 0 8px 0; }
-    h1, h2, h3 { margin: 0; }
+    .attribution {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      font-size: 12px;
+      color: rgba(0, 0, 0, 0.6);
+      background: rgba(255, 255, 255, 0.9);
+      padding: 8px 12px;
+      border-radius: 20px;
+      backdrop-filter: blur(10px);
+    }
+    
+    .attribution a {
+      color: rgba(0, 0, 0, 0.7);
+      text-decoration: none;
+    }
+    
+    .attribution a:hover {
+      text-decoration: underline;
+    }
     
     /* Better spacing between elements */
     .card-content > *:not(:last-child) {
-      margin-bottom: 12px;
+      margin-bottom: 15px;
     }
     
-    /* Center-align content for visual consistency */
-    .card-content {
-      text-align: center;
+    /* Responsive design improvements */
+    @media (max-width: 768px) {
+      main {
+        grid-template-columns: 1fr;
+        padding: 20px 15px;
+        gap: 20px;
+      }
+      
+      .header-container {
+        flex-direction: column;
+        gap: 15px;
+        text-align: center;
+      }
+      
+      .header-right {
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+      
+      .card[style*="grid-column: span 2"] {
+        grid-column: span 1;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="dashboard-title">DASHBOARD</div>
-  <header>
-    <div class="header-container">
-      <div class="header-left">
-        <div class="header-logo">🔥</div>
-        <div class="header-title-section">
-          <h1 class="header-title">PYROSENSE</h1>
-          <p class="header-subtitle">Advanced Fire Detection System - Python Edition</p>
-        </div>
-      </div>
-      <div class="header-right">
-        <span class="badge python-badge">Made with Python Flask</span>
-        <span class="badge system-badge">System Online</span>
-        <a href="/history" class="history-button">HISTORY</a>
-        <a href="/logout" class="logout-button">LOGOUT</a>
-      </div>
-    </div>
-  </header>
-  
-  <main>
-    <!-- Live Camera Feed -->
-    <div class="card">
-      <div class="card-header">
-        <div class="card-icon">📹</div>
-        <h2 class="card-title">Live Camera Feed</h2>
-      </div>
-      <div class="card-content">
-        <div class="video-feed" id="videoFeed">
-          Pyrosense is scanning for fire...
-        </div>
-        <div class="status-line">
-          <span class="status-label">Status:</span>
-          <strong id="fireStatus">{{ fire_status }}</strong>
-        </div>
-        <div class="button-group">
-          <button class="action-button" onclick="toggleRecording()" id="recordButton">
-            <span>Start Recording</span>
-          </button>
-          <button class="action-button" onclick="takeSnapshot()">
-            <span>Snapshot</span>
-          </button>
-          <button class="action-button" onclick="toggleNightVision()">
-            <span>Thermal/RGB</span>
-          </button>
-        </div>
-      </div>
-    </div>
-    
-    <!-- Thermal Reading -->
-    <div class="card">
-      <div class="card-header">
-        <div class="card-icon">🌡️</div>
-        <h2 class="card-title">Thermal Reading</h2>
-      </div>
-      <div class="card-content">
-        <div class="temperature-display" id="currentTemp">{{ current_temperature }}°C</div>
-        <div class="threshold-info">Heat Threshold: <strong id="thresholdValue">{{ threshold }}°C</strong></div>
-        <div class="slider-container">
-          <input type="range" min="30" max="100" value="{{ threshold }}" class="slider" id="thresholdSlider" oninput="updateThreshold(this.value)">
-        </div>
-        <div class="button-group">
-          <button class="action-button" onclick="calibrateSensor()">
-            <span>Calibrate</span>
-          </button>
-          <button class="action-button" onclick="resetThreshold()">
-            <span>Reset</span>
-          </button>
-        </div>
-      </div>
-    </div>
-    
-    <!-- Fire Detection Log -->
-    <div class="card">
-      <div class="card-header">
-        <div class="card-icon">📋</div>
-        <h2 class="card-title">Fire Detection Log</h2>
-      </div>
-      <div class="card-content">
-        <div class="log-container" id="logContainer">
-          {% for entry in log_entries %}
-          <div class="log-entry">{{ entry }}</div>
-          {% endfor %}
-        </div>
-        <div class="button-group">
-          <button class="action-button red" onclick="clearLog()">
-            <span>Clear Log</span>
-          </button>
-          <button class="action-button" onclick="exportLog()">
-            <span>Export</span>
-          </button>
-        </div>
-      </div>
-    </div>
-    
-    <!-- Alert Control -->
-    <div class="card">
-      <div class="card-header">
-        <div class="card-icon">🚨</div>
-        <h2 class="card-title">Alert Control</h2>
-      </div>
-      <div class="card-content">
-        <div class="alert-panel" id="alertPanel">⚠️ FIRE DETECTED!</div>
-        <div class="button-group">
-          <button class="action-button red" onclick="simulateAlert()">
-            <span>Test Alert</span>
-          </button>
-          <button class="action-button" onclick="acknowledgeAlert()">
-            <span>Acknowledge</span>
-          </button>
-          <button class="action-button" onclick="muteAlerts()">
-            <span>Mute (5min)</span>
-          </button>
-        </div>
-      </div>
-    </div>
-    
-    <!-- Device Status -->
-    <div class="card" style="grid-column: span 2;">
-      <div class="card-header">
-        <div class="card-icon">💻</div>
-        <h2 class="card-title">Device Status</h2>
-      </div>
-      <div class="card-content">
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-          <div class="device-row">
-            <div class="device-name">
-              <span class="status-indicator green"></span>
-              <span>RGB Camera:</span>
-            </div>
-            <span class="status-value" id="cameraStatus">{{ system_status.camera }}</span>
-          </div>
-          <div class="device-row">
-            <div class="device-name">
-              <span class="status-indicator green"></span>
-              <span>Thermal Sensor:</span>
-            </div>
-            <span class="status-value ok" id="thermalStatus">{{ system_status.thermal }}</span>
-          </div>
-          <div class="device-row">
-            <div class="device-name">
-              <span class="status-indicator green"></span>
-              <span>Edge System:</span>
-            </div>
-            <span class="status-value running" id="edgeStatus">{{ system_status.edge }}</span>
-          </div>
-          <div class="device-row">
-            <div class="device-name">
-              <span class="status-indicator green"></span>
-              <span>Internet:</span>
-            </div>
-            <span class="status-value connected" id="internetStatus">{{ system_status.internet }}</span>
+  <div class="dashboard-overlay">
+    <div class="dashboard-title">DASHBOARD</div>
+    <header>
+      <div class="header-container">
+        <div class="header-left">
+          <div class="header-logo">🔥</div>
+          <div class="header-title-section">
+            <h1 class="header-title">PYROSENSE</h1>
+            <p class="header-subtitle">Advanced Fire Detection System - Python Edition</p>
           </div>
         </div>
-        <div class="button-group" style="margin-top: 15px;">
-          <button class="action-button red" onclick="restartSystem()">
-            <span>Restart</span>
-          </button>
+        <div class="header-right">
+          <span class="badge python-badge">Made with Python Flask</span>
+          <span class="badge system-badge">System Online</span>
+          <a href="/history" class="history-button">📊 HISTORY</a>
+          <a href="/logout" class="logout-button">🚪 LOGOUT</a>
         </div>
       </div>
+    </header>
+    
+    <main>
+      <!-- Live Camera Feed -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon">📹</div>
+          <h2 class="card-title">Live Camera Feed</h2>
+        </div>
+        <div class="card-content">
+          <div class="video-feed" id="videoFeed">
+            Pyrosense is scanning for fire...
+          </div>
+          <div class="status-line">
+            <span class="status-label">Status:</span>
+            <strong id="fireStatus">{{ fire_status }}</strong>
+          </div>
+          <div class="button-group">
+            <button class="action-button" onclick="toggleRecording()" id="recordButton">
+              <span>Start Recording</span>
+            </button>
+            <button class="action-button" onclick="takeSnapshot()">
+              <span>Snapshot</span>
+            </button>
+            <button class="action-button" onclick="toggleNightVision()">
+              <span>Thermal/RGB</span>
+            </button>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Thermal Reading -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon">🌡️</div>
+          <h2 class="card-title">Thermal Reading</h2>
+        </div>
+        <div class="card-content">
+          <div class="temperature-display" id="currentTemp">{{ current_temperature }}°C</div>
+          <div class="threshold-info">Heat Threshold: <strong id="thresholdValue">{{ threshold }}°C</strong></div>
+          <div class="slider-container">
+            <input type="range" min="30" max="100" value="{{ threshold }}" class="slider" id="thresholdSlider" oninput="updateThreshold(this.value)">
+          </div>
+          <div class="button-group">
+            <button class="action-button" onclick="calibrateSensor()">
+              <span>Calibrate</span>
+            </button>
+            <button class="action-button" onclick="resetThreshold()">
+              <span>Reset</span>
+            </button>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Fire Detection Log -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon">📋</div>
+          <h2 class="card-title">Fire Detection Log</h2>
+        </div>
+        <div class="card-content">
+          <div class="log-container" id="logContainer">
+            {% for entry in log_entries %}
+            <div class="log-entry">{{ entry }}</div>
+            {% endfor %}
+          </div>
+          <div class="button-group">
+            <button class="action-button red" onclick="clearLog()">
+              <span>Clear Log</span>
+            </button>
+            <button class="action-button" onclick="exportLog()">
+              <span>Export</span>
+            </button>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Alert Control -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon">🚨</div>
+          <h2 class="card-title">Alert Control</h2>
+        </div>
+        <div class="card-content">
+          <div class="alert-panel" id="alertPanel">⚠️ FIRE DETECTED!</div>
+          <div class="button-group">
+            <button class="action-button red" onclick="simulateAlert()">
+              <span>Test Alert</span>
+            </button>
+            <button class="action-button" onclick="acknowledgeAlert()">
+              <span>Acknowledge</span>
+            </button>
+            <button class="action-button" onclick="muteAlerts()">
+              <span>Mute (5min)</span>
+            </button>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Device Status -->
+      <div class="card" style="grid-column: span 2;">
+        <div class="card-header">
+          <div class="card-icon">💻</div>
+          <h2 class="card-title">Device Status</h2>
+        </div>
+        <div class="card-content">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+            <div class="device-row">
+              <div class="device-name">
+                <span class="status-indicator green"></span>
+                <span>RGB Camera:</span>
+              </div>
+              <span class="status-value" id="cameraStatus">{{ system_status.camera }}</span>
+            </div>
+            <div class="device-row">
+              <div class="device-name">
+                <span class="status-indicator green"></span>
+                <span>Thermal Sensor:</span>
+              </div>
+              <span class="status-value ok" id="thermalStatus">{{ system_status.thermal }}</span>
+            </div>
+            <div class="device-row">
+              <div class="device-name">
+                <span class="status-indicator green"></span>
+                <span>Edge System:</span>
+              </div>
+              <span class="status-value running" id="edgeStatus">{{ system_status.edge }}</span>
+            </div>
+            <div class="device-row">
+              <div class="device-name">
+                <span class="status-indicator green"></span>
+                <span>Internet:</span>
+              </div>
+              <span class="status-value connected" id="internetStatus">{{ system_status.internet }}</span>
+            </div>
+          </div>
+          <div class="button-group" style="margin-top: 15px;">
+            <button class="action-button red" onclick="restartSystem()">
+              <span>Restart</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </main>
+    
+    <footer>
+      PyroSense 2025 © All rights reserved - Python Flask Edition
+    </footer>
+    
+    <div class="attribution">
+      <a href="https://www.freepik.com/free-vector/minimalist-background-gradient-design-style_34345006.htm">Background by AndreaCharlesta on Freepik</a>
     </div>
-  </main>
-  
-  <footer>
-    PyroSense 2025 © All rights reserved - Python Flask Edition
-  </footer>
+  </div>
 
   <script>
     // Dashboard state management
