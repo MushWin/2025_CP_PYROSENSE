@@ -77,6 +77,10 @@ HTML_TEMPLATE = """
       padding: 0;
       box-sizing: border-box;
     }
+    html, body {
+      max-width: 100vw;
+      overflow-x: hidden;
+    }
     
     body {
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -229,11 +233,6 @@ HTML_TEMPLATE = """
       transition: transform 0.3s ease, box-shadow 0.3s ease;
     }
     
-    .stat-card:hover {
-      transform: translateY(-5px);
-      box-shadow: 0 15px 35px rgba(0,0,0,0.2);
-    }
-    
     .stat-icon {
       font-size: 3rem;
       margin-bottom: 15px;
@@ -273,10 +272,6 @@ HTML_TEMPLATE = """
       transition: transform 0.3s ease;
     }
     
-    .filter-card:hover {
-      transform: translateY(-3px);
-    }
-    
     .filter-title {
       font-size: 1rem;
       font-weight: 700;
@@ -292,82 +287,93 @@ HTML_TEMPLATE = """
       font-size: 1.1rem;
     }
     
-    .filter-dropdown {
+    .custom-dropdown {
+      position: relative;
       width: 100%;
-      padding: 12px 15px;
-      border-radius: 12px;
-      border: 2px solid #e2e8f0;
-      margin-top: 8px;
-      text-align: center;
-      box-sizing: border-box;
-      font-size: 0.9rem;
-      background: white;
-      transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-      cursor: pointer;
-      transform: scale(1);
-      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-      appearance: none;
-      -webkit-appearance: none;
-      -moz-appearance: none;
-      background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
-      background-position: right 12px center;
-      background-repeat: no-repeat;
-      background-size: 16px;
-      padding-right: 40px;
+      margin-bottom: 16px;
+      font-family: inherit;
+      z-index: 100;
     }
-    
-    .filter-dropdown:focus {
-      outline: none;
-      border-color: #ff6b6b;
-      box-shadow: 0 0 0 4px rgba(255, 107, 107, 0.15), 0 8px 25px rgba(0,0,0,0.15);
-      transform: scale(1.03);
-      background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23ff6b6b' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
-    }
-    
-    .filter-dropdown:hover {
-      border-color: #ff6b6b;
-      box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.1), 0 6px 20px rgba(0,0,0,0.12);
-      transform: scale(1.02);
-      background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23ff6b6b' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
-    }
-    
-    .filter-dropdown option {
-      padding: 12px 15px;
-      text-align: center;
-      background: white;
-      color: #333;
-      font-size: 0.9rem;
-      font-weight: 500;
+    .custom-dropdown .dropdown-toggle {
+      width: 100%;
+      padding: 14px 20px;
+      background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 100%);
+      color: #fff;
       border: none;
-      outline: none;
-      transition: all 0.2s ease;
-    }
-    
-    .filter-dropdown option:hover {
-      background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 100%);
-      color: white;
-    }
-    
-    .filter-dropdown option:checked {
-      background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 100%);
-      color: white;
+      border-radius: 14px;
+      font-size: 1.05rem;
       font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 4px 18px rgba(255, 107, 107, 0.12);
+      transition: background 0.3s, box-shadow 0.3s;
+      text-align: left;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      position: relative;
+      outline: none;
+      min-height: 52px; /* Add min-height for consistency */
+    }
+    .custom-dropdown .dropdown-toggle::after {
+      content: "▼";
+      font-size: 1em;
+      color: #fff;
+      margin-left: auto;
+      transition: transform 0.3s;
+      vertical-align: middle;
+    }
+    .custom-dropdown.open .dropdown-toggle::after {
+      transform: rotate(-180deg);
+    }
+    .custom-dropdown .dropdown-menu {
+      position: absolute;
+      top: 110%;
+      left: 0;
+      width: 100%;
+      background: #fff;
+      border-radius: 14px;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.14);
+      border: 1px solid #e2e8f0;
+      padding: 12px;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-10px) scale(0.98);
+      transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+      z-index: 9999;
+      max-height: 220px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
     }
     
-    /* Smooth dropdown animation on open */
-    .filter-dropdown[size] {
-      animation: dropdownExpand 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    .custom-dropdown.open .dropdown-menu {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0) scale(1);
     }
     
-    @keyframes dropdownExpand {
-      from {
-        opacity: 0;
-        transform: scale(0.95) translateY(-10px);
-      }
-      to {
-        opacity: 1;
-        transform: scale(1) translateY(0);
-      }
+    .custom-dropdown .dropdown-item {
+      padding: 10px 16px;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s;
+      border: none;
+      background: rgba(255, 107, 107, 0.05);
+      font-weight: 500;
+      text-align: center;
+      white-space: nowrap;
+      border-radius: 12px;
+      margin: 0;
+      width: 80%;
+    }
+    
+    /* Update the Fire Detection dropdown items to be consistent width */
+    #fireDetectionMenu .dropdown-item,
+    #alertLevelMenu .dropdown-item {
+      width: 80%;
     }
     
     .actions-container {
@@ -571,6 +577,22 @@ HTML_TEMPLATE = """
       gap: 10px;
     }
     
+    .date-input-group {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    
+    .date-input-label {
+      font-size: 0.92rem;
+      font-weight: 600;
+      color: #ff6b6b;
+      margin-bottom: 2px;
+      margin-left: 2px;
+      letter-spacing: 0.5px;
+      text-align: left;
+    }
+    
     .date-input {
       width: 100%;
       padding: 12px 15px;
@@ -606,36 +628,33 @@ HTML_TEMPLATE = """
       backdrop-filter: blur(0px) !important;
       z-index: 999999 !important;
       display: none !important;
-      align-items: center !important;
-      justify-content: center !important;
+      align-items: center !important; /* center vertically */
+      justify-content: center !important; /* center horizontally */
       opacity: 0 !important;
       visibility: hidden !important;
       transition: all 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) !important;
     }
-    
     .calendar-modal-overlay.show {
       display: flex !important;
       opacity: 1 !important;
       visibility: visible !important;
-      background: rgba(0, 0, 0, 0.8) !important;
-      backdrop-filter: blur(10px) !important;
+      background: rgba(0, 0, 0, 0.15) !important;
+      backdrop-filter: blur(2px) !important;
     }
-    
     .calendar-modal {
-      position: relative !important;
-      background: white !important;
-      border-radius: 8px !important;
-      box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5) !important;
-      width: 650px !important;
-      max-width: 95vw !important;
+      position: relative !important; /* center in overlay */
+      margin: auto !important;
+      width: 100%;
+      max-width: 650px !important;
+      min-width: 350px !important;
       max-height: 90vh !important;
       overflow: auto !important;
       z-index: 1000000 !important;
-      transform: scale(0.5) translateY(-100px) !important;
+      transform: scale(0.95) translateY(-20px) !important;
       opacity: 0 !important;
-      transition: all 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) !important;
+      transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94) !important;
+      box-shadow: 0 25px 50px rgba(0, 0, 0, 0.25) !important;
     }
-    
     .calendar-modal-overlay.show .calendar-modal {
       transform: scale(1) translateY(0px) !important;
       opacity: 1 !important;
@@ -722,7 +741,7 @@ HTML_TEMPLATE = """
       font-weight: 600 !important;
       color: #666 !important;
       margin-bottom: 6px !important;
-      text-align: center !important;
+      text-align: left !important;
     }
     
     .date-input-field {
@@ -970,6 +989,39 @@ HTML_TEMPLATE = """
       visibility: visible !important;
       pointer-events: all !important;
     }
+
+    /* Add style for temperature range inputs */
+    .temp-range-group {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 8px;
+    }
+    .temp-range-label {
+      font-size: 0.92rem;
+      font-weight: 600;
+      color: #ff6b6b;
+      margin-bottom: 2px;
+      margin-left: 2px;
+      letter-spacing: 0.5px;
+    }
+    .temp-range-input {
+      width: 100%;
+      padding: 12px 15px;
+      border-radius: 12px;
+      border: 2px solid #e2e8f0;
+      background: #fff;
+      font-size: 1rem;
+      color: #333;
+      text-align: center;
+      transition: border-color 0.3s, box-shadow 0.3s;
+      box-shadow: 0 2px 4px rgba(255,107,107,0.04);
+      outline: none;
+    }
+    .temp-range-input:focus {
+      border-color: #ff6b6b;
+      box-shadow: 0 0 0 3px rgba(255,107,107,0.10);
+    }
   </style>
 </head>
 <body>
@@ -996,7 +1048,7 @@ HTML_TEMPLATE = """
     <div class="stats-container">
       <div class="stat-card">
         <div class="stat-icon">🔥</div>
-        <div class="stat-value">{{ stats.fire_events }}</div>
+        <div class="stat-value">{{ stats.total_fires }}</div>
         <div class="stat-label">Total Fire Events</div>
       </div>
       
@@ -1027,8 +1079,14 @@ HTML_TEMPLATE = """
           <span>Select Date Range</span>
         </div>
         <div class="date-range-inputs">
-          <input type="text" class="date-input" id="startDate" placeholder="📅 Start Date" readonly>
-          <input type="text" class="date-input" id="endDate" placeholder="📅 End Date" readonly>
+          <div class="date-input-group">
+            <label class="date-input-label">Start Date</label>
+            <input type="text" class="date-input" id="startDate" placeholder="📅 Start Date" readonly>
+          </div>
+          <div class="date-input-group">
+            <label class="date-input-label">End Date</label>
+            <input type="text" class="date-input" id="endDate" placeholder="📅 End Date" readonly>
+          </div>
         </div>
       </div>
       
@@ -1037,22 +1095,12 @@ HTML_TEMPLATE = """
           <span class="filter-icon">🌡️</span>
           <span>Temperature Range</span>
         </div>
-        <select class="filter-dropdown" id="minTemperature">
-          <option value="">Min Temperature</option>
-          <option value="20">20°C</option>
-          <option value="30">30°C</option>
-          <option value="40">40°C</option>
-          <option value="50">50°C</option>
-          <option value="60">60°C</option>
-        </select>
-        <select class="filter-dropdown" id="maxTemperature">
-          <option value="">Max Temperature</option>
-          <option value="40">40°C</option>
-          <option value="50">50°C</option>
-          <option value="60">60°C</option>
-          <option value="70">70°C</option>
-          <option value="80">80°C</option>
-        </select>
+        <div class="temp-range-group">
+          <label class="temp-range-label" for="minTemperature">Min Temperature (°C)</label>
+          <input type="number" class="temp-range-input" id="minTemperature" placeholder="Min °C" min="0" max="100" step="1">
+          <label class="temp-range-label" for="maxTemperature">Max Temperature (°C)</label>
+          <input type="number" class="temp-range-input" id="maxTemperature" placeholder="Max °C" min="0" max="100" step="1">
+        </div>
       </div>
       
       <div class="filter-card">
@@ -1060,13 +1108,16 @@ HTML_TEMPLATE = """
           <span class="filter-icon">🚨</span>
           <span>Alert Level</span>
         </div>
-        <select class="filter-dropdown" id="alertLevel">
-          <option value="">Alert Level</option>
-          <option value="none">None</option>
-          <option value="low">Low</option>
-          <option value="medium">Medium</option>
-          <option value="high">High</option>
-        </select>
+        <div class="custom-dropdown" id="alertLevelDropdown">
+          <button class="dropdown-toggle" type="button" id="alertLevelButton">
+            <span id="alertLevelText">Select Alert Level</span>
+          </button>
+          <div class="dropdown-menu" id="alertLevelMenu">
+            <button class="dropdown-item" type="button" data-value="low">Low</button>
+            <button class="dropdown-item" type="button" data-value="medium">Medium</button>
+            <button class="dropdown-item" type="button" data-value="high">High</button>
+          </div>
+        </div>
       </div>
       
       <div class="filter-card">
@@ -1074,11 +1125,15 @@ HTML_TEMPLATE = """
           <span class="filter-icon">🔥</span>
           <span>Fire Detection</span>
         </div>
-        <select class="filter-dropdown" id="fireDetection">
-          <option value="">All Levels</option>
-          <option value="yes">Detected</option>
-          <option value="no">Not Detected</option>
-        </select>
+        <div class="custom-dropdown" id="fireDetectionDropdown">
+          <button class="dropdown-toggle" type="button" id="fireDetectionButton">
+            <span id="fireDetectionText">Select Fire Detection</span>
+          </button>
+          <div class="dropdown-menu" id="fireDetectionMenu">
+            <button class="dropdown-item" type="button" data-value="yes">Detected</button>
+            <button class="dropdown-item" type="button" data-value="no">Not Detected</button>
+          </div>
+        </div>
       </div>
     </div>
     
@@ -1259,6 +1314,29 @@ HTML_TEMPLATE = """
       const cancelBtn = document.getElementById('cancelBtn');
       const applyBtn = document.getElementById('applyBtn');
       
+      // Improved scroll lock: prevent double-locking
+      let scrollLocked = false;
+      function lockBodyScroll() {
+        if (scrollLocked) return;
+        document.body.style.overflow = 'hidden';
+        document.body.style.position = 'fixed';
+        document.body.style.width = '100%';
+        document.body.style.top = `-${window.scrollY}px`;
+        document.body.dataset.scrollY = window.scrollY;
+        scrollLocked = true;
+      }
+
+      function unlockBodyScroll() {
+        if (!scrollLocked) return;
+        const scrollY = document.body.dataset.scrollY || '0';
+        document.body.style.overflow = '';
+        document.body.style.position = '';
+        document.body.style.width = '';
+        document.body.style.top = '';
+        window.scrollTo(0, parseInt(scrollY || '0'));
+        scrollLocked = false;
+      }
+      
       // State
       let currentDate = new Date();
       let startDate = null;
@@ -1433,31 +1511,42 @@ HTML_TEMPLATE = """
         generateCalendar(currentDate);
       }
       
-      // Modal controls with WORKING animations
-      function showCalendar() {
+      // --- Remove scroll locking ---
+      // function lockBodyScroll() {
+      //   document.body.style.overflow = 'hidden';
+      //   document.body.style.position = 'fixed';
+      //   document.body.style.width = '100vw';
+      // }
+      // function unlockBodyScroll() {
+      //   document.body.style.overflow = '';
+      //   document.body.style.position = '';
+      //   document.body.style.width = '';
+      // }
+
+      // --- Modified showCalendar to always center modal and lock scrolling ---
+      function showCalendar(inputElement) {
+        // Always lock body scroll at the very start
+        lockBodyScroll();
+
         console.log('🎬 Starting calendar show animation...');
-        
-        // Prepare modal for animation
         calendarOverlay.style.display = 'flex';
         calendarOverlay.style.visibility = 'visible';
         calendarOverlay.classList.remove('show');
-        
+
         // Force reflow to ensure styles are applied
         void calendarOverlay.offsetHeight;
-        
+
         // Trigger animation
         setTimeout(() => {
           calendarOverlay.classList.add('show');
           console.log('✨ Calendar animation started');
         }, 10);
-        
-        document.body.style.overflow = 'hidden';
-        
+
         generateCalendar(currentDate);
         updateModeDisplay();
         updateDisplays();
       }
-      
+
       function hideCalendar() {
         console.log('🎬 Starting calendar hide animation...');
         
@@ -1468,8 +1557,8 @@ HTML_TEMPLATE = """
         setTimeout(() => {
           calendarOverlay.style.display = 'none';
           calendarOverlay.style.visibility = 'hidden';
-          document.body.style.overflow = '';
-          console.log('✨ Calendar hidden');
+          // Always unlock body scroll when hiding
+          unlockBodyScroll();
         }, 500);
       }
       
@@ -1547,18 +1636,16 @@ HTML_TEMPLATE = """
       
       // Event listeners
       if (startDateInput) {
-        startDateInput.addEventListener('click', () => {
-          console.log('Start date input clicked');
+        startDateInput.addEventListener('click', function() {
           selectingStart = true;
-          showCalendar();
+          showCalendar(this); // always call showCalendar
         });
       }
       
       if (endDateInput) {
-        endDateInput.addEventListener('click', () => {
-          console.log('End date input clicked');
+        endDateInput.addEventListener('click', function() {
           selectingStart = false;
-          showCalendar();
+          showCalendar(this); // always call showCalendar
         });
       }
       
@@ -1685,6 +1772,56 @@ HTML_TEMPLATE = """
       initializeDisplay();
       addDropdownAnimations();
       console.log('Calendar system initialized');
+      
+      // Add dropdown functionality
+      function setupDropdowns() {
+        const dropdowns = document.querySelectorAll('.custom-dropdown');
+        dropdowns.forEach(dropdown => {
+          const toggleBtn = dropdown.querySelector('.dropdown-toggle');
+          const menu = dropdown.querySelector('.dropdown-menu');
+          const items = dropdown.querySelectorAll('.dropdown-item');
+          const displayText = dropdown.querySelector('span');
+          
+          // Toggle dropdown visibility on button click
+          toggleBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropdown.classList.toggle('open');
+            
+            // Close all other dropdowns
+            dropdowns.forEach(d => {
+              if (d !== dropdown) d.classList.remove('open');
+            });
+          });
+          
+          // Handle item selection
+          items.forEach(item => {
+            item.addEventListener('click', function() {
+              const value = this.dataset.value;
+              const text = this.textContent;
+              displayText.textContent = text;
+              
+              // Remove selected class from all items
+              items.forEach(i => i.classList.remove('selected'));
+              // Add selected class to clicked item
+              this.classList.add('selected');
+              
+              // Close dropdown after selection
+              dropdown.classList.remove('open');
+            });
+          });
+        });
+        
+        // Close dropdowns when clicking elsewhere
+        document.addEventListener('click', function(e) {
+          if (!e.target.closest('.custom-dropdown')) {
+            dropdowns.forEach(d => d.classList.remove('open'));
+          }
+        });
+      }
+      
+      // Initialize dropdowns
+      setupDropdowns();
     });
 
     // Action button functionality
@@ -1919,6 +2056,7 @@ def export_json():
     
     # Create JSON export
     export_data = {
+       
         'export_info': {
             'generated_at': datetime.now().isoformat(),
             'total_records': len(filtered_data),
@@ -1970,72 +2108,6 @@ if __name__ == '__main__':
     print("  • 🐍 Python-powered analytics");
     print("To stop server: Press Ctrl+C");
     print("=" * 60);
-    
-    # Run the Flask development server on port 5001
-    app.run(debug=True, host='0.0.0.0', port=5001);
-    app.run(debug=True, host='0.0.0.0', port=5001);
-    print("Features:");
-    print("  • 📅 Date range filtering");
-    print("  • 🌡️ Temperature range filtering");
-    print("  • 🚨 Alert level filtering");
-    print("  • 🔥 Fire detection filtering");
-    print("  • 📊 CSV/JSON data export");
-    print("  • 📈 Real-time statistics");
-    print("  • 🐍 Python-powered analytics");
-    print("To stop server: Press Ctrl+C");
-    print("=" * 60);
-    
-    # Run the Flask development server on port 5001
-    app.run(debug=True, host='0.0.0.0', port=5001);
-    app.run(debug=True, host='0.0.0.0', port=5001);
-    print("  • 🐍 Python-powered analytics");
-    print("To stop server: Press Ctrl+C");
-    print("=" * 60);
-    
-    # Run the Flask development server on port 5001
-    app.run(debug=True, host='0.0.0.0', port=5001);
-    app.run(debug=True, host='0.0.0.0', port=5001);
 
-if __name__ == '__main__':
-    print("🐍 Starting PyroSense History Python Flask Application...");
-    print("📊 Historical Data Analysis System - Python Edition");
-    print("=" * 60);
-    print("History Page URL: http://localhost:5001");
-    print("NOTE: Use the same login credentials as the login portal");
-    print("Features:");
-    print("  • 📅 Date range filtering");
-    print("  • 🌡️ Temperature range filtering");
-    print("  • 🚨 Alert level filtering");
-    print("  • 🔥 Fire detection filtering");
-    print("  • 📊 CSV/JSON data export");
-    print("  • 📈 Real-time statistics");
-    print("  • 🐍 Python-powered analytics");
-    print("To stop server: Press Ctrl+C");
-    print("=" * 60);
-    
     # Run the Flask development server on port 5001
-    app.run(debug=True, host='0.0.0.0', port=5001);
-    app.run(debug=True, host='0.0.0.0', port=5001);
-    print("Features:");
-    print("  • 📅 Date range filtering");
-    print("  • 🌡️ Temperature range filtering");
-    print("  • 🚨 Alert level filtering");
-    print("  • 🔥 Fire detection filtering");
-    print("  • 📊 CSV/JSON data export");
-    print("  • 📈 Real-time statistics");
-    print("  • 🐍 Python-powered analytics");
-    print("To stop server: Press Ctrl+C");
-    print("=" * 60);
-    
-    # Run the Flask development server on port 5001
-    app.run(debug=True, host='0.0.0.0', port=5001);
-    app.run(debug=True, host='0.0.0.0', port=5001);
-    print("  • 🐍 Python-powered analytics");
-    print("To stop server: Press Ctrl+C");
-    print("=" * 60);
-    
-    # Run the Flask development server on port 5001
-    app.run(debug=True, host='0.0.0.0', port=5001);
-    app.run(debug=True, host='0.0.0.0', port=5001);
-    app.run(debug=True, host='0.0.0.0', port=5001);
-    app.run(debug=True, host='0.0.0.0', port=5001);
+    app.run(debug=True, host='0.0.0.0', port=5001)

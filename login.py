@@ -6,6 +6,9 @@ Simple login redirect for demonstration purposes - UI ONLY
 
 from flask import Flask, render_template_string, request, redirect, session, url_for, send_from_directory
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
 app.secret_key = 'pyrosense_shared_secret_key'  # Use the same key in both apps
@@ -422,6 +425,47 @@ FORGOT_PASSWORD_TEMPLATE = """
 </html>
 """
 
+# SMTP configuration (set these as environment variables for security)
+SMTP_SERVER = os.environ.get('PYROSENSE_SMTP_SERVER', 'smtp.gmail.com')
+SMTP_PORT = int(os.environ.get('PYROSENSE_SMTP_PORT', 587))
+SMTP_USER = os.environ.get('PYROSENSE_SMTP_USER', 'your_email@gmail.com')
+SMTP_PASS = os.environ.get('PYROSENSE_SMTP_PASS', 'your_password')
+
+# For demo: simulate user email lookup
+DEMO_ADMIN_EMAIL = "admin@example.com"
+
+def send_password_reset_email(to_email, username="User"):
+    """Send a password reset email via SMTP"""
+    reset_link = "http://localhost:5000/login"  # In production, generate a real token/link
+    subject = "PyroSense Password Reset Request"
+    body = f"""
+    Hi {username},
+
+    You requested a password reset for your PyroSense account.
+    Please click the link below to reset your password:
+
+    {reset_link}
+
+    If you did not request this, please ignore this email.
+
+    - PyroSense Team
+    """
+
+    msg = MIMEMultipart()
+    msg['From'] = SMTP_USER
+    msg['To'] = to_email
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
 @app.route('/static/<filename>')
 def static_files(filename):
     """Serve static files"""
@@ -459,13 +503,21 @@ def logout():
 
 @app.route('/forgot-password', methods=['GET', 'POST'])
 def forgot_password():
-    """Handle password reset requests - UI ONLY DEMO"""
+    """Handle password reset requests - UI ONLY DEMO with SMTP"""
     error = None
     success = None
-    
+
     if request.method == 'POST':
-        # Accept any email - this is UI only
-        success = "Password reset email sent! Please check your inbox."
+        email = request.form.get('email')
+        # Simulate DB lookup: only allow DEMO_ADMIN_EMAIL
+        if email and email.lower() == DEMO_ADMIN_EMAIL.lower():
+            sent, err = send_password_reset_email(email, username="Admin")
+            if sent:
+                success = "Password reset email sent! Please check your inbox."
+            else:
+                error = f"Failed to send email: {err}"
+        else:
+            error = "Email address not found in the system."
     
     return render_template_string(FORGOT_PASSWORD_TEMPLATE, error=error, success=success)
 
