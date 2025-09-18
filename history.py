@@ -1207,17 +1207,31 @@ HTML_TEMPLATE = """
     
     <!-- Pagination -->
     <div class="pagination">
-      <button class="pagination-button">1</button>
+      {% if total_pages > 1 %}
+        {% if current_page > 1 %}
+          <button class="pagination-button" data-page="{{ current_page - 1 }}">←</button>
+        {% endif %}
+        
+        {% for page_num in range(1, total_pages + 1) %}
+          {% if page_num == current_page %}
+            <button class="pagination-button active">{{ page_num }}</button>
+          {% elif page_num == 1 or page_num == total_pages or (page_num >= current_page - 1 and page_num <= current_page + 1) %}
+            <button class="pagination-button" data-page="{{ page_num }}">{{ page_num }}</button>
+          {% elif page_num == current_page - 2 or page_num == current_page + 2 %}
+            <button class="pagination-button">...</button>
+          {% endif %}
+        {% endfor %}
+        
+        {% if current_page < total_pages %}
+          <button class="pagination-button" data-page="{{ current_page + 1 }}">→</button>
+        {% endif %}
+      {% endif %}
     </div>
   </main>
   
   <footer>
     PyroSense 2025 © All rights reserved - Python Flask Edition
   </footer>
-  
-  <div class="attribution">
-    <a href="https://www.freepik.com/free-vector/minimalist-background-gradient-design-style_34345006.htm">Background by AndreaCharlesta on Freepik</a>
-  </div>
 
   <!-- MODAL CALENDAR POPUP - FIXED VERSION -->
   <div class="calendar-modal-overlay" id="calendarOverlay">
@@ -1632,6 +1646,13 @@ HTML_TEMPLATE = """
             }, 600);
           });
         });
+        
+        // Close dropdowns when clicking elsewhere
+        document.addEventListener('click', function(e) {
+          if (!e.target.closest('.custom-dropdown')) {
+            dropdowns.forEach(d => d.classList.remove('open'));
+          }
+        });
       }
       
       // Event listeners
@@ -1857,6 +1878,20 @@ HTML_TEMPLATE = """
     document.getElementById('generateReport').addEventListener('click', function() {
       alert('Report generation feature would be implemented here in a full version.');
     });
+    
+    // Pagination functionality
+    document.querySelectorAll('.pagination-button[data-page]').forEach(button => {
+      button.addEventListener('click', function() {
+        const page = this.dataset.page;
+        
+        // Create URL with current parameters plus new page
+        const url = new URL(window.location);
+        url.searchParams.set('page', page);
+        
+        // Navigate to the new page
+        window.location.href = url.toString();
+      });
+    });
   </script>
 </body>
 </html>
@@ -1940,14 +1975,16 @@ def root():
             </html>
         """)
     
-    # Get recent 50 records for initial display
-    recent_data = historical_data[:50]
+    # Get recent 10 records for initial display
+    recent_data = historical_data[:10]
     stats = calculate_statistics(historical_data)
     
     return render_template_string(HTML_TEMPLATE, 
                                 records=recent_data,
                                 stats=stats,
                                 total_records=len(historical_data),
+                                current_page=1,
+                                total_pages=(len(historical_data) + 9) // 10,
                                 username=session.get('name', 'User'))
 
 # Update the root route to show the dashboard directly
@@ -1981,7 +2018,7 @@ def get_history():
     
     # Pagination
     page = int(request.args.get('page', 1))
-    per_page = 50
+    per_page = 10
     start_idx = (page - 1) * per_page
     end_idx = start_idx + per_page
     
@@ -1993,6 +2030,7 @@ def get_history():
     
     return jsonify({
         'records': paginated_data,
+       
         'stats': stats,
         'total_records': len(filtered_data),
         'pagination': {

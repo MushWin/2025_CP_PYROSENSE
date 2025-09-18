@@ -715,11 +715,6 @@ HTML_TEMPLATE = """
     <footer>
       PyroSense 2025 © All rights reserved - Python Flask Edition
     </footer>
-    
-    <div class="attribution">
-      <a href="https://www.freepik.com/free-vector/minimalist-background-gradient-design-style_34345006.htm">Background by AndreaCharlesta on Freepik</a>
-    </div>
-  </div>
 
   <script>
     // Dashboard state management
