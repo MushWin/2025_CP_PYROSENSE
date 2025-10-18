@@ -1,5 +1,0 @@
-classes=1
-train=/kaggle/working/data/fire_train_enhanced.txt
-valid=/kaggle/working/data/fire_valid_enhanced.txt
-names=/kaggle/working/data/fire.names
-backup=/kaggle/working/backup

@@ -4,12 +4,17 @@ PyroSense Dashboard - Python Flask Application
 Advanced Fire Detection System Dashboard
 """
 
-from flask import Flask, render_template_string, jsonify, request, redirect, session
+from flask import Flask, render_template_string, jsonify, request, redirect, session, Response, stream_with_context
 from datetime import datetime
 import random
 import time
 import threading
 import json
+import cv2  # ADDED: OpenCV for webcam streaming
+import numpy as np  # ADDED: NumPy for image processing
+import os  # ADDED: missing os import used by model file helpers
+import glob
+import pathlib
 
 app = Flask(__name__)
 # Add the same secret key as login.py for shared sessions
@@ -36,6 +41,584 @@ dashboard_state = {
         f"[{datetime.now().strftime('%m/%d/%Y %H:%M:%S')}] No fire detected"
     ]
 }
+
+# Add global video and fire-model flags
+video_capture = None
+video_lock = threading.Lock()
+fire_model_enabled = False  # Controlled from the web UI
+# Add the camera enabled flag
+camera_enabled = True  # when False, generator will serve "camera off" image and capture is released
+
+# --- ADDED: Fire model globals ---
+net_fire = None
+fire_classes = []
+fire_output_layers = []
+fire_model_loaded = False
+fire_confidence_threshold = 0.25  # default; may be adjusted based on model class count
+
+# NEW: inference tuning to reduce lag
+inference_interval = 3      # run DNN once every N frames (increase to lower CPU)
+jpeg_quality = 80           # JPEG encode quality (reduce bandwidth / CPU)
+
+# Helper: locate model files in common locations (returns dict with keys 'cfg','weights','names' or {} if none)
+def find_fire_model_files(model_dirs=None):
+    try:
+        # default search locations (include your YoloV4 path used by test_yolo_camera.py)
+        if model_dirs is None:
+            model_dirs = [
+                os.path.join(os.getcwd(), "YoloV4-Tiny_Model", "fire_extracted_files"),
+                os.path.join(os.getcwd(), "YoloV4-Tiny_Model"),
+                os.path.join(os.getcwd(), 'models', 'fire'),
+                os.path.join(os.getcwd(), 'models'),
+                os.path.join(os.getcwd(), 'model'),
+            ]
+
+        # scan each directory recursively for best candidates
+        for d in model_dirs:
+            try:
+                if not d or not os.path.isdir(d):
+                    continue
+
+                cfgs = glob.glob(os.path.join(d, "**", "*.cfg"), recursive=True)
+                weights = glob.glob(os.path.join(d, "**", "*.weights"), recursive=True) + glob.glob(os.path.join(d, "**", "*.pt"), recursive=True) + glob.glob(os.path.join(d, "**", "*.onnx"), recursive=True)
+                names = glob.glob(os.path.join(d, "**", "*.names"), recursive=True) + glob.glob(os.path.join(d, "**", "*.txt"), recursive=True)
+
+                # prefer yolov4-tiny-ish configs first
+                chosen_cfg = None
+                for candidate in cfgs:
+                    bn = os.path.basename(candidate).lower()
+                    if "yolov4" in bn or "yolov4-tiny" in bn or "tiny" in bn:
+                        chosen_cfg = candidate
+                        break
+                if not chosen_cfg and cfgs:
+                    chosen_cfg = cfgs[0]
+
+                # prefer weights with "best" or largest file
+                chosen_weights = None
+                if weights:
+                    for w in weights:
+                        if "best" in os.path.basename(w).lower() or "final" in os.path.basename(w).lower():
+                            chosen_weights = w
+                            break
+                    if not chosen_weights:
+                        # fallback to largest weights file (likely the trained darknet .weights)
+                        chosen_weights = max(weights, key=lambda x: os.path.getsize(x))
+
+                # prefer obj.names or any .names
+                chosen_names = None
+                for n in names:
+                    bn = os.path.basename(n).lower()
+                    if bn in ("obj.names", "classes.names", "obj.names.txt") or "obj" in bn:
+                        chosen_names = n
+                        break
+                if not chosen_names and names:
+                    chosen_names = names[0]
+
+                files = {}
+                if chosen_cfg:
+                    files['cfg'] = chosen_cfg
+                if chosen_weights:
+                    files['weights'] = chosen_weights
+                if chosen_names:
+                    files['names'] = chosen_names
+
+                if files:
+                    # log selection for debugging in UI
+                    add_log_entry(f"Model discovery: cfg={os.path.basename(files.get('cfg','None'))} weights={os.path.basename(files.get('weights','None'))} names={os.path.basename(files.get('names','None'))} (from {d})")
+                    return files
+            except Exception:
+                continue
+
+        # final fallback to cwd files
+        cfgs = glob.glob('*.cfg')
+        weights = glob.glob('*.weights') + glob.glob('*.pt') + glob.glob('*.onnx')
+        names = glob.glob('*.names') + glob.glob('*.txt')
+        files = {}
+        if cfgs:
+            files['cfg'] = cfgs[0]
+        if weights:
+            # pick largest in cwd
+            files['weights'] = max(weights, key=lambda x: os.path.getsize(x))
+        if names:
+            files['names'] = names[0]
+        if files:
+            add_log_entry(f"Model discovery (cwd): cfg={files.get('cfg')} weights={files.get('weights')} names={files.get('names')}")
+        return files
+    except Exception as e:
+        add_log_entry(f"Model discovery error: {e}")
+        return {}
+
+# Helper: read class names from the .names/.txt file
+def load_fire_classes(names_path):
+    try:
+        if not names_path:
+            return None
+        with open(names_path, 'r', encoding='utf-8', errors='ignore') as fh:
+            lines = [ln.strip() for ln in fh.readlines() if ln.strip()]
+            return lines if lines else None
+    except Exception:
+        return None
+
+# Helper: compute output layer names for older OpenCV dnn APIs
+def get_output_layers(net):
+    try:
+        # net.getUnconnectedOutLayers can return array-like of indices (1-based)
+        layer_names = net.getLayerNames()
+        outs = net.getUnconnectedOutLayers()
+        # normalize to list of ints
+        if isinstance(outs, np.ndarray):
+            ids = outs.flatten().tolist()
+        else:
+            try:
+                ids = np.array(outs).flatten().tolist()
+            except Exception:
+                ids = []
+        names = []
+        for i in ids:
+            try:
+                idx = int(i) - 1
+                if 0 <= idx < len(layer_names):
+                    names.append(layer_names[idx])
+            except Exception:
+                continue
+        return names
+    except Exception:
+        return []
+
+def get_video_capture():
+	"""Singleton video capture (lazy init). Attempts multiple backends to open camera for faster availability."""
+	global video_capture
+	with video_lock:
+		if not camera_enabled:
+			# If camera turned off, ensure capture released
+			if video_capture is not None:
+				try:
+					video_capture.release()
+				except:
+					pass
+				video_capture = None
+			return None
+
+		# If already created and opened return it
+		if video_capture is not None and getattr(video_capture, "isOpened", lambda: False)():
+			return video_capture
+
+		# Otherwise attempt to open using helper
+		video_capture = open_capture_with_backends(0)
+		# set helpful properties if opened
+		try:
+			if video_capture is not None and video_capture.isOpened():
+				video_capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+				video_capture.set(cv2.CAP_PROP_FPS, 30)
+				video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+				video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+		except:
+			pass
+		return video_capture
+
+# --- ADDED: dedicated opener used by get_video_capture and the toggle API ---
+def open_capture_with_backends(index=0, warmup_reads=2):
+	"""Try multiple backends to open camera quickly and perform a small warm-up read sequence."""
+	backends = []
+	try:
+		# prefer platform-friendly backends when available
+		backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+	except Exception:
+		backends = [cv2.CAP_ANY]
+
+	for backend in backends:
+		try:
+			cap = cv2.VideoCapture(index, backend)
+			if cap is not None and cap.isOpened():
+				# set reasonable defaults
+				try:
+					cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+					cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+					cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+					cap.set(cv2.CAP_PROP_FPS, 30)
+				except:
+					pass
+				# quick warm-up reads to ensure camera actually returns frames fast
+				for _ in range(warmup_reads):
+					try:
+						ret, _ = cap.read()
+						if not ret:
+							time.sleep(0.05)
+					except:
+						time.sleep(0.05)
+				return cap
+			else:
+				try:
+					if cap is not None:
+						cap.release()
+				except:
+					pass
+		except Exception:
+			pass
+
+	# Final fallback without backend hint
+	try:
+		cap = cv2.VideoCapture(index)
+		if cap is not None and cap.isOpened():
+			try:
+				cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+				cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+			except:
+				pass
+			for _ in range(warmup_reads):
+				try:
+					ret, _ = cap.read()
+					if not ret:
+						time.sleep(0.05)
+				except:
+					time.sleep(0.05)
+			return cap
+		else:
+			try:
+				if cap is not None:
+					cap.release()
+			except:
+				pass
+	except Exception:
+		pass
+
+	return None
+
+# --- UPDATED: more robust output-layer name getter used when loading model ---
+def load_fire_model():
+	"""Attempt to locate and load the fire model. Returns True on success."""
+	global net_fire, fire_classes, fire_output_layers, fire_model_loaded, fire_confidence_threshold, fire_model_enabled
+	fire_model_loaded = False
+	files = find_fire_model_files()
+	if not files:
+		add_log_entry("Fire model: model folder not found (no cfg/weights/names discovered)")
+		return False
+	cfg = files.get('cfg')
+	weights = files.get('weights')
+	names = files.get('names')
+
+	if not (cfg and weights and names):
+		add_log_entry(f"Fire model: incomplete model files (cfg={bool(cfg)}, weights={bool(weights)}, names={bool(names)})")
+		return False
+
+	try:
+		# readNet supports (weights, cfg)
+		net = cv2.dnn.readNet(weights, cfg)
+		# Prefer CPU for compatibility
+		try:
+			net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+			net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+		except Exception:
+			pass
+
+		classes = load_fire_classes(names)
+		if not classes:
+			add_log_entry("Fire model: loaded but failed to read classes file")
+			return False
+
+		net_fire = net
+		fire_classes = classes
+
+		# Prefer the modern OpenCV convenience method if available
+		try:
+			if hasattr(net_fire, "getUnconnectedOutLayersNames"):
+				fire_output_layers = net_fire.getUnconnectedOutLayersNames() or []
+			else:
+				fire_output_layers = get_output_layers(net_fire) or []
+		except Exception:
+			fire_output_layers = get_output_layers(net_fire) or []
+
+		fire_model_loaded = True
+
+		# adjust confidence threshold heuristically
+		if len(classes) == 44:
+			fire_confidence_threshold = 0.15
+		elif len(classes) == 1:
+			fire_confidence_threshold = 0.3
+		else:
+			fire_confidence_threshold = 0.2
+
+		add_log_entry(f"Fire model loaded: {os.path.basename(weights)} ({len(classes)} classes) - names:{os.path.basename(names)}")
+		# Enable overlay automatically when the model successfully loads (so boxes appear without extra toggle)
+		fire_model_enabled = True
+		return True
+	except Exception as e:
+		add_log_entry(f"Fire model load failed: {e}")
+		fire_model_loaded = False
+		return False
+
+# Attempt to load at startup (non-blocking attempt) and enable overlay if successful
+try:
+	_ok = load_fire_model()
+	# load_fire_model sets fire_model_enabled True on success; ensure it's set here as well for clarity
+	if _ok:
+		fire_model_enabled = True
+except Exception:
+	pass
+
+def generate_mjpeg():
+	"""Generator that yields MJPEG frames. Shows placeholder if camera disabled, and re-checks when enabled."""
+	frame_idx = 0
+	# store last detections to re-draw while skipping inference
+	last_boxes = []
+	last_class_ids = []
+	last_confidences = []
+	last_labels = []
+	last_colors = []
+	
+	while True:
+		cap = get_video_capture()
+		# If camera disabled or not available, yield placeholder but keep re-checking
+		if cap is None or not getattr(cap, "isOpened", lambda: False)():
+			placeholder = np.zeros((360,640,3), dtype=np.uint8)
+			cv2.putText(placeholder, "Camera is OFF", (40, 190), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 3)
+			cv2.putText(placeholder, "Click 'Camera' to enable feed", (40, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,200), 2)
+			ret, jpeg = cv2.imencode('.jpg', placeholder)
+			frame = jpeg.tobytes()
+			# yield placeholder and re-check camera state on next loop iteration
+			yield (b'--frame\r\n'
+				   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+			time.sleep(0.25)
+			continue
+
+		# Camera is available — stream frames
+		ret, frame = cap.read()
+		if not ret or frame is None:
+			# If read failed, give the device a moment and re-check
+			time.sleep(0.05)
+			continue
+
+		# Optional: mirror to match UI expectation
+		frame = cv2.flip(frame, 1)
+
+		# If dashboard_state says FIRE DETECTED, show top alert bar on stream
+		if dashboard_state.get('fire_status') and 'FIRE' in dashboard_state.get('fire_status'):
+			cv2.rectangle(frame, (0,0), (frame.shape[1], 40), (0,0,255), -1)
+			cv2.putText(frame, "ALERT: FIRE DETECTED", (10,28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+
+		# --- ADDED: Run lightweight YOLO fire-model inference and overlay boxes when enabled ---
+		try:
+			frame_idx += 1
+			# Only run inference every N frames to reduce CPU usage
+			do_infer = (fire_model_enabled and fire_model_loaded and net_fire is not None and (frame_idx % inference_interval == 0))
+			if do_infer:
+				# run on smaller input to save CPU (blobFromImage will resize)
+				blob = cv2.dnn.blobFromImage(frame, 0.00392, (320, 320), (0,0,0), True, crop=False)
+				net_fire.setInput(blob)
+				try:
+					if fire_output_layers:
+						outs = net_fire.forward(fire_output_layers)
+					else:
+						outs = net_fire.forward()
+				except Exception:
+					try:
+						outs = net_fire.forward()
+					except Exception:
+						outs = []
+
+				if isinstance(outs, np.ndarray):
+					outs = [outs]
+				elif not isinstance(outs, (list, tuple)):
+					outs = []
+
+				height, width = frame.shape[:2]
+				boxes = []
+				confidences = []
+				class_ids = []
+				labels = []
+				colors = []
+
+				for out in outs:
+					for detection in out:
+						if detection.shape[0] <= 5:
+							continue
+						scores = detection[5:]
+						if scores.size == 0:
+							continue
+						class_id = int(np.argmax(scores))
+						class_score = float(scores[class_id])
+						try:
+							obj_conf = float(detection[4])
+						except Exception:
+							obj_conf = 1.0
+						combined = obj_conf * class_score
+						confidence = max(class_score, combined)
+						if confidence > fire_confidence_threshold:
+							cx = int(detection[0] * width)
+							cy = int(detection[1] * height)
+							w_box = int(detection[2] * width)
+							h_box = int(detection[3] * height)
+							x = int(cx - w_box / 2)
+							y = int(cy - h_box / 2)
+							boxes.append([x, y, w_box, h_box])
+							confidences.append(confidence)
+							class_ids.append(class_id)
+							# label and color mapping
+							label = fire_classes[class_id] if class_id < len(fire_classes) else f"ID:{class_id}"
+							labels.append(label)
+							if 'person' in label.lower():
+								colors.append((0,255,0))   # green for person
+							elif 'fire' in label.lower():
+								colors.append((0,0,255))   # red for fire
+								dashboard_state['fire_status'] = 'FIRE DETECTED!'
+							else:
+								colors.append((0,140,255)) # orange for others
+
+				# NMS and store final detections to redraw on skipped frames
+				last_boxes = []
+				last_class_ids = []
+				last_confidences = []
+				last_labels = []
+				last_colors = []
+				if boxes:
+					try:
+						idxs = cv2.dnn.NMSBoxes(boxes, confidences, fire_confidence_threshold, 0.4)
+					except Exception:
+						idxs = []
+					idx_list = idxs.flatten().tolist() if hasattr(idxs, 'flatten') and len(idxs) > 0 else (list(idxs) if isinstance(idxs, (list,tuple)) else [])
+					for i in idx_list:
+						try:
+							ii = int(i)
+							last_boxes.append(boxes[ii])
+							last_class_ids.append(class_ids[ii])
+							last_confidences.append(confidences[ii])
+							last_labels.append(labels[ii])
+							last_colors.append(colors[ii])
+						except Exception:
+							continue
+
+			# Re-draw last detections (fresh or from previous inference)
+			for i in range(len(last_boxes)):
+				try:
+					x, y, w_box, h_box = last_boxes[i]
+					label = last_labels[i] if i < len(last_labels) else (fire_classes[last_class_ids[i]] if last_class_ids and last_class_ids[i] < len(fire_classes) else f"ID:{last_class_ids[i] if last_class_ids else '?'}")
+					conf = last_confidences[i] if i < len(last_confidences) else 0.0
+					color = last_colors[i] if i < len(last_colors) else (0,140,255)
+					thickness = 4 if (('fire' in label.lower()) or ('person' not in label.lower() and 'fire' in label.lower())) else 2
+					cv2.rectangle(frame, (x, y), (x + w_box, y + h_box), color, thickness)
+					cv2.putText(frame, f"{label} {conf:.2f}", (x, max(10, y-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+				except Exception:
+					continue
+		except Exception:
+			# Don't break streaming on any model error; log and continue
+			pass
+
+		# Encode as JPEG (slightly lower quality for less bandwidth/latency)
+		encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
+		ret2, jpeg = cv2.imencode('.jpg', frame, encode_params)
+		if not ret2:
+			# skip this frame if JPEG encoding failed
+			continue
+		frame_bytes = jpeg.tobytes()
+		yield (b'--frame\r\n'
+			   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+		# small sleep to avoid pegging CPU while allowing ~30fps
+		time.sleep(0.02)
+
+# New route: MJPEG stream of webcam (session-protected)
+@app.route('/video_feed')
+def video_feed():
+    if not session.get('user'):
+        return jsonify({'error':'Authentication required'}), 401
+    return Response(stream_with_context(generate_mjpeg()), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+# API to toggle fire overlay on the video feed
+@app.route('/api/toggle_fire_model', methods=['POST'])
+def api_toggle_fire_model():
+    if not session.get('user'):
+        return jsonify({'error':'Authentication required'}), 401
+    global fire_model_enabled, fire_model_loaded
+    fire_model_enabled = not fire_model_enabled
+    message = ''
+    if fire_model_enabled:
+        # Try to load model if not already loaded
+        if not fire_model_loaded:
+            ok = load_fire_model()
+            if ok:
+                message = 'Fire overlay enabled (model loaded)'
+            else:
+                message = 'Fire overlay requested but model failed to load'
+                # Keep flag true to allow retry later, but mark not loaded
+                fire_model_loaded = False
+        else:
+            message = 'Fire overlay enabled'
+    else:
+        message = 'Fire overlay disabled'
+    add_log_entry(f"UI: {message}")
+    return jsonify({'success': True, 'fire_model_enabled': fire_model_enabled, 'message': message, 'model_loaded': fire_model_loaded})
+
+# API to get current fire-model status
+@app.route('/api/fire_model_status')
+def api_fire_model_status():
+    if not session.get('user'):
+        return jsonify({'error':'Authentication required'}), 401
+    return jsonify({'fire_model_enabled': fire_model_enabled})
+
+# API to toggle camera feed on/off
+@app.route('/api/toggle_camera_feed', methods=['POST'])
+def api_toggle_camera_feed():
+	"""Toggle camera feed on/off. When enabling, open capture immediately for fast availability."""
+	if not session.get('user'):
+		return jsonify({'error':'Authentication required'}), 401
+	global camera_enabled, video_capture
+	camera_enabled = not camera_enabled
+
+	stream_ready = False
+	if camera_enabled:
+		# Attempt to initialize/open the capture immediately so stream becomes available
+		with video_lock:
+			try:
+				# Release any stale capture first
+				if video_capture is not None:
+					try:
+						video_capture.release()
+					except:
+						pass
+					video_capture = None
+
+				# Use the robust opener that tries multiple backends and warms up the camera
+				video_capture = open_capture_with_backends(0, warmup_reads=3)
+				# if capture opened, ensure properties
+				if video_capture is not None and video_capture.isOpened():
+					try:
+						video_capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+						video_capture.set(cv2.CAP_PROP_FPS, 30)
+						video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+						video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+					except:
+						pass
+					# quick prime read
+					try:
+						ret, _ = video_capture.read()
+						if ret:
+							stream_ready = True
+					except:
+						stream_ready = bool(video_capture.isOpened())
+				else:
+					stream_ready = False
+			except Exception:
+				stream_ready = False
+	else:
+		# disable: release capture immediately
+		with video_lock:
+			try:
+				if video_capture is not None:
+					video_capture.release()
+			except:
+				pass
+			video_capture = None
+		stream_ready = False
+
+	message = 'Camera feed enabled' if camera_enabled else 'Camera feed disabled'
+	add_log_entry(f"UI: {message} (ready={stream_ready})")
+	return jsonify({'success': True, 'camera_enabled': camera_enabled, 'stream_ready': stream_ready, 'message': message})
+
+# API to query camera feed status
+@app.route('/api/camera_feed_status')
+def api_camera_feed_status():
+    if not session.get('user'):
+        return jsonify({'error':'Authentication required'}), 401
+    return jsonify({'camera_enabled': camera_enabled})
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -246,20 +829,71 @@ HTML_TEMPLATE = """
       text-align: center;
     }
     
-    .video-feed {
+    .video-player {
+      position: relative;
       width: 100%;
-      height: 180px;
-      border-radius: 15px;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding-top: 56.25%; /* 16:9 aspect ratio */
+      background: #222;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.25);
+    }
+    .video-player.minimized {
+      padding-top: 28%; /* smaller when minimized */
+      width: 320px;
+      height: auto;
+    }
+    .video-player img.stream {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      background: #000;
+    }
+    .video-controls {
+      position: absolute;
+      right: 12px;
+      bottom: 12px;
       display: flex;
-      align-items: center;
-      justify-content: center;
-      color: white;
-      font-size: 1rem;
-      margin-bottom: 20px;
-      text-align: center;
-      font-weight: 600;
-      box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+      gap: 8px;
+      z-index: 20;
+    }
+    .video-control-btn {
+      background: rgba(0,0,0,0.6);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.08);
+      padding: 8px 12px;
+      border-radius: 24px;
+      cursor: pointer;
+      font-weight: 700;
+      backdrop-filter: blur(6px);
+    }
+    .video-control-btn.active {
+      box-shadow: 0 6px 18px rgba(255,0,0,0.25);
+      background: linear-gradient(90deg,#ff6b6b,#ff8a00);
+    }
+    .video-topbar {
+      position: absolute;
+      left: 12px;
+      top: 12px;
+      z-index: 20;
+      display:flex;
+      gap:8px;
+      align-items:center;
+    }
+    .video-badge {
+      background: rgba(0,0,0,0.5);
+      color: #fff;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-weight: 700;
+      font-size: 0.85rem;
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
     }
     
     .status-line {
@@ -577,14 +1211,29 @@ HTML_TEMPLATE = """
           <h2 class="card-title">Live Camera Feed</h2>
         </div>
         <div class="card-content">
-          <div class="video-feed" id="videoFeed">
-            Pyrosense is scanning for fire...
+          <!-- Replaced static box with live MJPEG stream + controls -->
+          <div class="video-player" id="videoPlayer">
+            <div class="video-topbar">
+              <div class="video-badge" id="streamStatus">Scanning for fire...</div>
+            </div>
+            <img id="cameraStream" class="stream" src="/video_feed" alt="Live camera stream">
+            <div class="video-controls">
+              <!-- Removed Toggle Fire button and Minimize button per request -->
+              <button class="video-control-btn" id="fullscreenBtn" onclick="toggleFullscreen()">Fullscreen</button>
+            </div>
           </div>
-          <div class="status-line">
+
+          <div class="status-line" style="margin-top:12px;">
             <span class="status-label">Status:</span>
             <strong id="fireStatus">{{ fire_status }}</strong>
           </div>
+
           <div class="button-group">
+            <!-- NEW: Camera toggle button placed left of Start Recording -->
+            <button class="action-button" id="toggleCameraBtn" onclick="toggleCameraFeed()" style="background: linear-gradient(90deg,#6c7cff,#8fafff);">
+              <span id="toggleCameraLabel">Camera: ON</span>
+            </button>
+
             <button class="action-button" onclick="toggleRecording()" id="recordButton">
               <span>Start Recording</span>
             </button>
@@ -965,6 +1614,87 @@ HTML_TEMPLATE = """
       }
     }
 
+    // Fire model toggle (UI)
+    async function toggleFireModel() {
+      try {
+        const res = await fetch('/api/toggle_fire_model', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          const btn = document.getElementById('toggleFireBtn');
+          const badge = document.getElementById('streamStatus');
+          if (data.fire_model_enabled) {
+            btn.classList.add('active');
+            btn.textContent = 'Fire: ON';
+            badge.textContent = 'Fire overlay ON';
+            badge.style.background = 'linear-gradient(90deg,#ff6b6b,#ff8a00)';
+          } else {
+            btn.classList.remove('active');
+            btn.textContent = 'Toggle Fire';
+            badge.textContent = 'Scanning for fire...';
+            badge.style.background = '';
+          }
+          addLogEntry(data.message);
+        }
+      } catch (e) {
+        alert('Failed to toggle fire model');
+      }
+    }
+
+    // Fullscreen toggle
+    function toggleFullscreen() {
+      const el = document.getElementById('videoPlayer');
+      if (!document.fullscreenElement) {
+        if (el.requestFullscreen) el.requestFullscreen();
+        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+        document.getElementById('fullscreenBtn').textContent = 'Exit Fullscreen';
+      } else {
+        if (document.exitFullscreen) document.exitFullscreen();
+        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+        document.getElementById('fullscreenBtn').textContent = 'Fullscreen';
+      }
+    }
+
+    // NEW: Toggle camera feed
+    async function toggleCameraFeed() {
+      try {
+        const res = await fetch('/api/toggle_camera_feed', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          const btnLabel = document.getElementById('toggleCameraLabel');
+          const stream = document.getElementById('cameraStream');
+          if (data.camera_enabled) {
+            btnLabel.textContent = 'Camera: ON';
+            // reload stream src to restart
+            stream.src = '/video_feed?ts=' + Date.now();
+          } else {
+            btnLabel.textContent = 'Camera: OFF';
+            // show placeholder by reloading src (server will return placeholder while disabled)
+            stream.src = '/video_feed?ts=' + Date.now();
+          }
+          addLogEntry(data.message);
+        }
+      } catch (e) {
+        alert('Failed to toggle camera feed');
+      }
+    }
+
+    // On load: query camera status and set UI state
+    window.addEventListener('load', () => {
+      fetch('/api/camera_feed_status').then(r => r.json()).then(d => {
+        const btnLabel = document.getElementById('toggleCameraLabel');
+        const stream = document.getElementById('cameraStream');
+        if (d.camera_enabled) {
+          btnLabel.textContent = 'Camera: ON';
+          stream.src = '/video_feed?ts=' + Date.now();
+        } else {
+          btnLabel.textContent = 'Camera: OFF';
+          stream.src = '/video_feed?ts=' + Date.now();
+        }
+      }).catch(()=>{});
+      // existing dashboard init
+      initDashboard();
+    });
+
     // Initialize the dashboard
     function initDashboard() {
       addLogEntry('PyroSense Dashboard initialized');
@@ -1230,7 +1960,15 @@ def background_temperature_monitor():
 temperature_thread = threading.Thread(target=background_temperature_monitor, daemon=True)
 temperature_thread.start()
 
-@app.route('/')
+# --- ADDED: safe startup attempt to load model (after logging and background thread exist) ---
+try:
+    loaded = load_fire_model()
+    if loaded:
+        fire_model_enabled = True
+except Exception:
+    # don't fail startup if model can't be loaded
+    pass
+
 def dashboard():
     """Main dashboard page"""
     # Check if user is authenticated
@@ -1252,6 +1990,10 @@ def dashboard():
         'username': session.get('name', 'User')  # Add username from session
     }
     return render_template_string(HTML_TEMPLATE, **template_data)
+
+@app.route('/')
+def index():
+    return dashboard()
 
 @app.route('/api/status')
 def get_status():
@@ -1458,6 +2200,8 @@ def forgot_password():
         # No actual email sending - this is UI only demo
         email = request.form.get('email')
         
+       
+        
         # Simulate email sending
         add_log_entry(f'Password reset email sent to {email}')
         success = 'Password reset email sent!'
@@ -1469,6 +2213,22 @@ def history():
     """Redirect to history page"""
     return redirect('http://localhost:5001')  # Redirect to history Flask app
 
+# --- ADDED: debug API to report model files / class count to UI ---
+@app.route('/api/fire_model_info')
+def api_fire_model_info():
+    if not session.get('user'):
+        return jsonify({'error': 'Authentication required'}), 401
+    files = find_fire_model_files()
+    return jsonify({
+        'found': bool(files),
+        'cfg': files.get('cfg') if files else None,
+        'weights': files.get('weights') if files else None,
+        'names': files.get('names') if files else None,
+        'classes': len(fire_classes) if fire_classes else 0,
+        'model_loaded': fire_model_loaded,
+        'fire_model_enabled': fire_model_enabled
+    })
+    
 if __name__ == '__main__':
     print("🐍 Starting PyroSense Python Flask Dashboard...")
     print("🔥 Fire Detection System - Python Edition")

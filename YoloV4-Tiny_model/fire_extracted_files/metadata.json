@@ -1,0 +1,12 @@
+{
+  "model": "yolov4-tiny",
+  "classes": [
+    "fire",
+    "person"
+  ],
+  "num_classes": 2,
+  "exported_at": "2025-10-17 15:40:13",
+  "weights": "yolov4-tiny-custom_best.weights",
+  "cfg": "yolov4-tiny-custom.cfg",
+  "names": "obj.names"
+}
