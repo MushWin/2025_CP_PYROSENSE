@@ -7,11 +7,16 @@ Simple login redirect for demonstration purposes - UI ONLY
 from flask import Flask, render_template_string, request, redirect, session, url_for, send_from_directory
 import os
 import smtplib
+import sqlite3
+from werkzeug.security import generate_password_hash, check_password_hash
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import requests
+import sys
+import traceback
 
 app = Flask(__name__)
-app.secret_key = 'pyrosense_shared_secret_key'  # Use the same key in both apps
+app.secret_key = os.environ.get('PYROSENSE_SECRET', 'pyrosense_shared_secret_key')  # Use env var if available
 
 # Admin credentials - UI only, not actually used for verification
 ADMIN_USERNAME = "admin"
@@ -148,6 +153,16 @@ LOGIN_TEMPLATE = """
             border: 1px solid #feb2b2;
         }
         
+        .success-message {
+            padding: 15px 20px;
+            margin-bottom: 25px;
+            border-radius: 12px;
+            background-color: #c6f6d5;
+            color: #22543d;
+            font-weight: 500;
+            border: 1px solid #9ae6b4;
+        }
+        
         .attribution {
             position: fixed;
             bottom: 20px;
@@ -184,6 +199,10 @@ LOGIN_TEMPLATE = """
         
         {% if error %}
         <div class="flash-message">{{ error }}</div>
+        {% endif %}
+
+        {% if success %}
+        <div class="success-message">{{ success }}</div>
         {% endif %}
         
         <form action="/login" method="post">
@@ -430,137 +449,193 @@ SMTP_SERVER = os.environ.get('PYROSENSE_SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.environ.get('PYROSENSE_SMTP_PORT', 587))
 SMTP_USER = os.environ.get('PYROSENSE_SMTP_USER', 'your_email@gmail.com')
 SMTP_PASS = os.environ.get('PYROSENSE_SMTP_PASS', 'your_password')
+# Optional camera control endpoint (set PYROSENSE_CAMERA_CONTROL_URL to enable); leave empty to disable camera control
+CAMERA_CONTROL_URL = os.environ.get('PYROSENSE_CAMERA_CONTROL_URL', '')
 
-# For demo: simulate user email lookup
-DEMO_ADMIN_EMAIL = "admin@example.com"
+# Path to SQLite DB file
+DB_PATH = os.path.join(os.path.dirname(__file__), 'pyrosense_db.db')
 
-def send_password_reset_email(to_email, username="User"):
-    """Send a password reset email via SMTP"""
-    reset_link = "http://localhost:5000/login"  # In production, generate a real token/link
-    subject = "PyroSense Password Reset Request"
-    body = f"""
-    Hi {username},
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-    You requested a password reset for your PyroSense account.
-    Please click the link below to reset your password:
-
-    {reset_link}
-
-    If you did not request this, please ignore this email.
-
-    - PyroSense Team
-    """
-
-    msg = MIMEMultipart()
-    msg['From'] = SMTP_USER
-    msg['To'] = to_email
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain'))
-
-    try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-@app.route('/static/<filename>')
-def static_files(filename):
-    """Serve static files"""
-    return send_from_directory('static', filename)
-
-@app.route('/')
-def index():
-    """Redirect root to login page"""
-    return redirect(url_for('login'))
+def init_db():
+    """Create tables only. Do NOT create any demo admin user."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    # Create users table (no demo account creation)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS Users (
+            UserID INTEGER PRIMARY KEY AUTOINCREMENT,
+            Username TEXT UNIQUE NOT NULL,
+            Password TEXT NOT NULL,
+            Email TEXT UNIQUE
+        )
+    """)
+    conn.commit()
+    conn.close()
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    """Handle login page display and form submission - UI ONLY DEMO"""
-    error = None
-    
-    if request.method == 'POST':
-        # No actual verification - this is UI only demo
-        # Get username just to store it in session
-        username = request.form.get('username', 'admin')
-        
-        # Set user session
-        session['user'] = username
-        session['name'] = 'Administrator'
-        
-        # Redirect to dashboard (dashboard.py) on port 5002
-        return redirect('http://localhost:5002/')
-    
-    return render_template_string(LOGIN_TEMPLATE, error=error)
+	"""Handle login page display and form submission (SQLite-backed)"""
+	error = None
+	# read optional success message passed via query string
+	success = request.args.get('success')
 
-@app.route('/logout')
-def logout():
-    """Handle user logout"""
-    session.clear()
+	if request.method == 'POST':
+		username = request.form.get('username', '').strip()
+		password = request.form.get('password', '').strip()
+
+		if not username or not password:
+			error = "Please provide both username and password."
+			return render_template_string(LOGIN_TEMPLATE, error=error)
+
+		user = None
+		conn = None
+		try:
+			conn = get_db_connection()
+			c = conn.cursor()
+			c.execute("SELECT UserID, Username, Password, Email FROM Users WHERE Username = ?", (username,))
+			user = c.fetchone()
+		except Exception as e:
+			# log full traceback to server console for debugging
+			print("Database error on login lookup:", e, file=sys.stderr)
+			traceback.print_exc()
+			error = "Internal server error. Check server logs."
+			if conn:
+				conn.close()
+			return render_template_string(LOGIN_TEMPLATE, error=error)
+
+		authenticated = False
+		# If user found, check password. Support hashed and plain-text legacy entries.
+		if user:
+			stored_pw = user['Password'] or ""
+			try:
+				# Try secure hash check first
+				if check_password_hash(stored_pw, password):
+					authenticated = True
+				else:
+					# Fallback: plaintext equality (legacy). If it matches, upgrade DB to hashed password.
+					if stored_pw == password:
+						authenticated = True
+						try:
+							new_hash = generate_password_hash(password)
+							c.execute("UPDATE Users SET Password = ? WHERE UserID = ?", (new_hash, user['UserID']))
+							conn.commit()
+							print(f"Upgraded plaintext password to hashed for user '{username}'", file=sys.stderr)
+						except Exception as e:
+							# log upgrade failure but do not block login
+							print("Password upgrade failed:", e, file=sys.stderr)
+							traceback.print_exc()
+			except Exception as e:
+				# Some malformed hash or unexpected error — fallback to direct compare
+				print("Password check error:", e, file=sys.stderr)
+				traceback.print_exc()
+				if stored_pw == password:
+					authenticated = True
+
+		# close connection if open
+		if conn:
+			conn.close()
+
+		if authenticated:
+			# set session and redirect to dashboard
+			session['user'] = user['UserID']
+			session['name'] = user['Username']
+			print(f"User '{username}' logged in successfully.", file=sys.stderr)
+			return redirect('http://localhost:5002/')
+		else:
+			# avoid leaking details to UI
+			error = "Invalid username or password."
+
+	return render_template_string(LOGIN_TEMPLATE, error=error, success=success)
+
+# --- Added: redirect root to /login so visiting localhost:5000 works ---
+@app.route('/')
+def index():
     return redirect(url_for('login'))
 
+# --- Added: forgot-password route so the link in the template is handled ---
 @app.route('/forgot-password', methods=['GET', 'POST'])
 def forgot_password():
-    """Handle password reset requests - UI ONLY DEMO with SMTP"""
     error = None
     success = None
 
     if request.method == 'POST':
-        email = request.form.get('email')
-        # Simulate DB lookup: only allow DEMO_ADMIN_EMAIL
-        if email and email.lower() == DEMO_ADMIN_EMAIL.lower():
-            sent, err = send_password_reset_email(email, username="Admin")
-            if sent:
-                success = "Password reset email sent! Please check your inbox."
-            else:
-                error = f"Failed to send email: {err}"
+        email = request.form.get('email', '').strip()
+        if not email:
+            error = "Please provide an email address."
+            return render_template_string(FORGOT_PASSWORD_TEMPLATE, error=error)
+
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("SELECT UserID, Username FROM Users WHERE Email = ?", (email,))
+            user = c.fetchone()
+            conn.close()
+        except Exception as e:
+            print("Database error on forgot-password lookup:", e, file=sys.stderr)
+            traceback.print_exc()
+            error = "Internal server error. Check server logs."
+            return render_template_string(FORGOT_PASSWORD_TEMPLATE, error=error)
+
+        # Always show a generic success message to avoid account enumeration.
+        if user:
+            # build a simple token and a reset link (token storage/verification not implemented here)
+            token = os.urandom(16).hex()
+            reset_link = url_for('login', _external=True) + f"?reset={token}"
+            try:
+                # Try to send email if SMTP creds are present (won't fail the flow if sending fails)
+                if SMTP_USER and SMTP_PASS:
+                    msg = MIMEMultipart()
+                    msg['From'] = SMTP_USER
+                    msg['To'] = email
+                    msg['Subject'] = "PyroSense Password Reset"
+                    body = f"To reset your PyroSense password, visit:\n\n{reset_link}\n\nIf you did not request this, ignore this message."
+                    msg.attach(MIMEText(body, 'plain'))
+                    s = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10)
+                    s.starttls()
+                    s.login(SMTP_USER, SMTP_PASS)
+                    s.send_message(msg)
+                    s.quit()
+                success = "If an account exists for that email, a reset link has been sent."
+            except Exception as e:
+                print("SMTP send error:", e, file=sys.stderr)
+                traceback.print_exc()
+                success = "If an account exists for that email, a reset link has been sent (email delivery may have failed)."
         else:
-            error = "Email address not found in the system."
-    
+            success = "If an account exists for that email, a reset link has been sent."
+
     return render_template_string(FORGOT_PASSWORD_TEMPLATE, error=error, success=success)
 
-# Route to history page - just a placeholder to redirect to the actual history application
-@app.route('/history')
-def history():
-    """Redirect to the history application"""
-    if not session.get('user'):
-        return redirect(url_for('login'))
-    
-    try:
-        import requests
-        # Check if history app is running on port 5003 instead of 5001
-        requests.get('http://localhost:5003', timeout=0.5)
-        return redirect('http://localhost:5003')
-    except:
-        # History app not running
-        return render_template_string("""
-            <html>
-                <head><title>History App Not Available</title></head>
-                <body style="background: #121212; color: white; text-align: center; padding-top: 100px; font-family: Arial;">
-                    <h1>History Application Not Running</h1>
-                    <p>The history application is not currently running on port 5003.</p>
-                    <p>Please start the history.py application on port 5003 and try again.</p>
-                    <p><a href="/logout" style="color: #f77f00;">Logout</a></p>
-                </body>
-            </html>
-        """)
+# --- Added: logout route to clear session and attempt to stop camera ---
+@app.route('/logout', methods=['GET'])
+def logout():
+    user_id = session.pop('user', None)
+    session.pop('name', None)
 
+    camera_result_msg = ""
+    if CAMERA_CONTROL_URL:
+        try:
+            # POST a simple JSON instructing the camera service to stop streaming
+            requests.post(CAMERA_CONTROL_URL, json={"action": "stop", "user_id": user_id}, timeout=5)
+            camera_result_msg = ""
+        except Exception as e:
+            print("Camera stop request failed:", e, file=sys.stderr)
+            camera_result_msg = " (camera stop request failed)"
+
+    msg = "You have been logged out." + camera_result_msg
+    # redirect back to login and show confirmation
+    return redirect(url_for('login', success=msg))
+
+# --- Added: ensure DB is initialized and app runs when executed directly ---
 if __name__ == '__main__':
-    print("🔐 Starting PyroSense Login System...")
-    print("🔥 Authentication Portal - Python Edition - UI ONLY DEMO")
-    print("=" * 60)
-    print("Login Page URL: http://localhost:5000")
-    print("This is a UI-only demo - any username/password will work")
-    print("NOTE: You must also run dashboard.py on port 5002 for redirection to work")
-    print("NOTE: History app should run on port 5003 to avoid conflicts")
-    print("NOTE: Background image should be saved as 'static/login background.jpg'")
-    print("To stop server: Press Ctrl+C")
-    print("=" * 60)
-    
-    app.run(debug=True, host='0.0.0.0', port=5000)
-    print("To stop server: Press Ctrl+C")
-    print("=" * 60)
-    
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # create DB/tables and demo admin (if needed) before starting the server
+    try:
+        init_db()
+    except Exception as e:
+        print("init_db() failed:", e, file=sys.stderr)
+        traceback.print_exc()
+    # Run the Flask dev server on localhost:5000 (matches your screenshot URL)
+    app.run(host='127.0.0.1', port=5000, debug=True)

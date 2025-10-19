@@ -125,6 +125,24 @@ To stop any application:
    - Make sure dashboard.py is running on port 5002
    - Check the console for any error messages
 
+### Using DB Browser for SQLite (important)
+- If you imported the SQL schema into DB Browser and you see a "*" next to the database name, that means the database in DB Browser is in-memory or has unsaved changes.
+- Save the database to disk:
+  1. File → Save Database As...
+  2. Choose the project folder: `c:\xampp\htdocs\2025_CP_PYROSENSE`
+  3. Save as `pyrosense.db`
+- Alternatively, run the Flask app which will create the DB file automatically:
+  ```powershell
+  cd c:\xampp\htdocs\2025_CP_PYROSENSE
+  python login.py
+  ```
+  This creates `pyrosense.db` next to `login.py` and inserts a demo admin user.
+- After you save `pyrosense.db`, open it in DB Browser (File → Open Database) — tables and data will persist and extensions (VS Code SQLite) can open it too.
+
+### Making login.py use the DB
+- Ensure `pyrosense.db` is in the same folder as `login.py`. The app uses `DB_PATH = c:\xampp\htdocs\2025_CP_PYROSENSE\pyrosense.db` by default.
+- If you prefer a different location, set the environment variable `PYROSENSE_DB` and update `login.py` accordingly (or move the file).
+
 ### System Requirements:
 - **OS:** Windows, macOS, or Linux
 - **Python:** Version 3.7 or higher
