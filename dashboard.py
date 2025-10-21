@@ -4,7 +4,7 @@ PyroSense Dashboard - Python Flask Application
 Advanced Fire Detection System Dashboard
 """
 
-from flask import Flask, render_template_string, jsonify, request, redirect, session, Response, stream_with_context
+from flask import Flask, render_template_string, jsonify, request, redirect, session, Response, stream_with_context, flash, url_for, make_response
 from datetime import datetime
 import random
 import time
@@ -59,6 +59,31 @@ fire_confidence_threshold = 0.25  # default; may be adjusted based on model clas
 # NEW: inference tuning to reduce lag
 inference_interval = 3      # run DNN once every N frames (increase to lower CPU)
 jpeg_quality = 80           # JPEG encode quality (reduce bandwidth / CPU)
+
+# Add detection bookkeeping and simple rate-limits
+last_detection_summary = {
+    'labels': [],          # last labels seen (list of strings)
+    'timestamp': 0         # last inference time (epoch)
+}
+detection_lock = threading.Lock()
+# Minimum seconds between logging identical detection summaries
+_detection_log_min_interval = 5.0
+
+# --- NEW: persistence folders and recording state ---
+recordings_dir = os.path.join(os.getcwd(), "recordings")
+snapshots_dir = os.path.join(os.getcwd(), "snapshots")
+os.makedirs(recordings_dir, exist_ok=True)
+os.makedirs(snapshots_dir, exist_ok=True)
+
+# Recording control globals
+recording_flag = False
+recording_thread = None
+recording_lock = threading.Lock()
+recording_filename = None
+recording_writer = None
+
+# Manual alert (set by Test Alert) — displayed separately from model detections
+dashboard_state.setdefault('manual_alert', None)
 
 # Helper: locate model files in common locations (returns dict with keys 'cfg','weights','names' or {} if none)
 def find_fire_model_files(model_dirs=None):
@@ -356,6 +381,51 @@ try:
 except Exception:
 	pass
 
+# --- NEW: recording loop used when recording is toggled ON ---
+def _recording_loop(filename, stop_flag_ref):
+    """Background loop that writes frames to a video file until stop flag set."""
+    global recording_writer
+    try:
+        cap = get_video_capture()
+        if cap is None or not getattr(cap, "isOpened", lambda: False)():
+            # try to open a temporary capture
+            cap = open_capture_with_backends(0, warmup_reads=2)
+            if cap is None or not getattr(cap, "isOpened", lambda: False)():
+                add_log_entry("Recording: camera not available to record")
+                return
+
+        # determine frame size
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(filename, fourcc, 20.0, (w, h))
+        with recording_lock:
+            recording_writer = writer
+
+        add_log_entry(f"Recording started -> {os.path.basename(filename)}")
+        while not stop_flag_ref():
+            try:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    time.sleep(0.05)
+                    continue
+                # mirror to match stream and write
+                frame = cv2.flip(frame, 1)
+                writer.write(frame)
+                time.sleep(0.05)
+            except Exception:
+                time.sleep(0.05)
+        try:
+            writer.release()
+        except:
+            pass
+        add_log_entry(f"Recording stopped -> {os.path.basename(filename)}")
+    except Exception as e:
+        add_log_entry(f"Recording error: {e}")
+    finally:
+        with recording_lock:
+            recording_writer = None
+
 def generate_mjpeg():
 	"""Generator that yields MJPEG frames. Shows placeholder if camera disabled, and re-checks when enabled."""
 	frame_idx = 0
@@ -371,8 +441,22 @@ def generate_mjpeg():
 		# If camera disabled or not available, yield placeholder but keep re-checking
 		if cap is None or not getattr(cap, "isOpened", lambda: False)():
 			placeholder = np.zeros((360,640,3), dtype=np.uint8)
-			cv2.putText(placeholder, "Camera is OFF", (40, 190), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 3)
-			cv2.putText(placeholder, "Click 'Camera' to enable feed", (40, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,200), 2)
+			# Centered title + subtitle
+			title = "Camera is OFF"
+			sub = "Click 'Camera' to enable feed"
+			font = cv2.FONT_HERSHEY_SIMPLEX
+			scale_title = 1.4
+			scale_sub = 0.7
+			thick = 3
+			# compute centered positions
+			(tw, th), _ = cv2.getTextSize(title, font, scale_title, thick)
+			(sw, sh), _ = cv2.getTextSize(sub, font, scale_sub, 2)
+			center_x = placeholder.shape[1] // 2
+			center_y = placeholder.shape[0] // 2
+			title_org = (center_x - tw // 2, center_y - 10)
+			sub_org = (center_x - sw // 2, center_y + 30)
+			cv2.putText(placeholder, title, title_org, font, scale_title, (255,255,255), thick, cv2.LINE_AA)
+			cv2.putText(placeholder, sub, sub_org, font, scale_sub, (200,200,200), 2, cv2.LINE_AA)
 			ret, jpeg = cv2.imencode('.jpg', placeholder)
 			frame = jpeg.tobytes()
 			# yield placeholder and re-check camera state on next loop iteration
@@ -388,13 +472,21 @@ def generate_mjpeg():
 			time.sleep(0.05)
 			continue
 
-		# Optional: mirror to match UI expectation
 		frame = cv2.flip(frame, 1)
 
-		# If dashboard_state says FIRE DETECTED, show top alert bar on stream
-		if dashboard_state.get('fire_status') and 'FIRE' in dashboard_state.get('fire_status'):
-			cv2.rectangle(frame, (0,0), (frame.shape[1], 40), (0,0,255), -1)
-			cv2.putText(frame, "ALERT: FIRE DETECTED", (10,28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+		# Display manual alert or model fire alert only if alerts_active is True
+		try:
+			if dashboard_state.get('alerts_active'):
+				manual_msg = dashboard_state.get('manual_alert')
+				if manual_msg:
+					# top bar for manual alerts
+					cv2.rectangle(frame, (0,0), (frame.shape[1], 40), (50,50,220), -1)
+					cv2.putText(frame, manual_msg[:80], (10,28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+				elif dashboard_state.get('fire_status') and 'FIRE' in dashboard_state.get('fire_status'):
+					cv2.rectangle(frame, (0,0), (frame.shape[1], 40), (0,0,255), -1)
+					cv2.putText(frame, "ALERT: FIRE DETECTED", (10,28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+		except Exception:
+			pass
 
 		# --- ADDED: Run lightweight YOLO fire-model inference and overlay boxes when enabled ---
 		try:
@@ -487,6 +579,34 @@ def generate_mjpeg():
 						except Exception:
 							continue
 
+				# Update shared detection summary and create logs for NEW detection changes (rate-limited)
+				try:
+					now = time.time()
+					with detection_lock:
+						new_labels = [lbl for lbl in last_labels]  # list of strings from this inference
+						# always update last_detection_summary so UI badge shows latest objects
+						last_detection_summary['labels'] = new_labels
+						last_detection_summary['timestamp'] = now
+						# also expose a human-friendly short summary for acknowledgement UI
+						if new_labels:
+							dashboard_state['last_detected'] = ', '.join(new_labels[:4])
+						else:
+							dashboard_state['last_detected'] = ''
+						
+						# Rate-limited logging when label set actually changed
+						prev_set = set(last_detection_summary.get('labels', []))
+						new_set = set(new_labels)
+						if new_set and new_set != prev_set and (now - last_detection_summary.get('timestamp', 0) > _detection_log_min_interval):
+							for i, lbl in enumerate(new_labels):
+								conf = last_confidences[i] if i < len(last_confidences) else 0.0
+								add_log_entry(f"Camera detection: {lbl} (conf={conf:.2f})")
+							if any('fire' in l.lower() for l in new_labels):
+								dashboard_state['fire_status'] = 'FIRE DETECTED!'
+								add_log_entry('🚨 FIRE ALERT: Camera detected fire!')
+				except Exception:
+					# don't break the stream on logging/errors
+					pass
+
 			# Re-draw last detections (fresh or from previous inference)
 			for i in range(len(last_boxes)):
 				try:
@@ -496,7 +616,7 @@ def generate_mjpeg():
 					color = last_colors[i] if i < len(last_colors) else (0,140,255)
 					thickness = 4 if (('fire' in label.lower()) or ('person' not in label.lower() and 'fire' in label.lower())) else 2
 					cv2.rectangle(frame, (x, y), (x + w_box, y + h_box), color, thickness)
-					cv2.putText(frame, f"{label} {conf:.2f}", (x, max(10, y-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+					cv2.putText(frame, f"{label} {conf:.2f}", (max(5, x), max(20, y-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 				except Exception:
 					continue
 		except Exception:
@@ -932,14 +1052,13 @@ HTML_TEMPLATE = """
       font-weight: 600;
       text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
       box-shadow: 0 4px 15px rgba(255, 107, 107, 0.3);
+      /* ensure anchors with this class don't show underline */
+      text-decoration: none;
     }
-    
-    .action-button:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 8px 25px rgba(255, 107, 107, 0.4);
-      background: linear-gradient(135deg, #ff5252 0%, #ff9500 50%, #fdd835 100%);
+    /* also cover anchor pseudo-states to be safe */
+    .action-button:link, .action-button:visited, .action-button:hover, .action-button:active {
+      text-decoration: none;
     }
-    
     .action-button.red {
       background: linear-gradient(135deg, #d62828 0%, #f77f00 100%);
       box-shadow: 0 4px 15px rgba(214, 40, 40, 0.3);
@@ -1198,7 +1317,7 @@ HTML_TEMPLATE = """
           <span class="badge python-badge">Made with Python Flask</span>
           <span class="badge system-badge">System Online</span>
           <a href="/history" class="history-button">📊 HISTORY</a>
-          <a href="/logout" class="logout-button">🚪 LOGOUT</a>
+          <a href="#" id="logoutBtn" class="logout-button">🚪 LOGOUT</a>
         </div>
       </div>
     </header>
@@ -1230,19 +1349,27 @@ HTML_TEMPLATE = """
 
           <div class="button-group">
             <!-- NEW: Camera toggle button placed left of Start Recording -->
-            <button class="action-button" id="toggleCameraBtn" onclick="toggleCameraFeed()" style="background: linear-gradient(90deg,#6c7cff,#8fafff);">
-              <span id="toggleCameraLabel">Camera: ON</span>
-            </button>
+            <form action="/action/toggle_camera" method="POST" style="display:inline;">
+              <button type="submit" class="action-button" id="toggleCameraBtn" style="background: linear-gradient(90deg,#6c7cff,#8fafff);">
+                <span id="toggleCameraLabel">Camera: ON</span>
+              </button>
+            </form>
 
-            <button class="action-button" onclick="toggleRecording()" id="recordButton">
-              <span>Start Recording</span>
-            </button>
-            <button class="action-button" onclick="takeSnapshot()">
-              <span>Snapshot</span>
-            </button>
-            <button class="action-button" onclick="toggleNightVision()">
-              <span>Thermal/RGB</span>
-            </button>
+            <form action="/action/toggle_recording" method="POST" style="display:inline;">
+              <button type="submit" class="action-button" id="recordButton">
+                <span>Start Recording</span>
+              </button>
+            </form>
+            <form action="/action/snapshot" method="POST" style="display:inline;">
+              <button type="submit" class="action-button">
+                <span>Snapshot</span>
+              </button>
+            </form>
+            <form action="/action/toggle_night_vision" method="POST" style="display:inline;">
+              <button type="submit" class="action-button">
+                <span>Thermal/RGB</span>
+              </button>
+            </form>
           </div>
         </div>
       </div>
@@ -1283,12 +1410,14 @@ HTML_TEMPLATE = """
             {% endfor %}
           </div>
           <div class="button-group">
-            <button class="action-button red" onclick="clearLog()">
-              <span>Clear Log</span>
-            </button>
-            <button class="action-button" onclick="exportLog()">
+            <form action="/action/clear_log" method="POST" id="clearLogForm" style="display:inline;">
+              <button type="submit" class="action-button red" id="clearLogBtn">
+                <span>Clear Log</span>
+              </button>
+            </form>
+            <a href="/api/export_log" class="action-button" id="exportLogBtn">
               <span>Export</span>
-            </button>
+            </a>
           </div>
         </div>
       </div>
@@ -1302,15 +1431,21 @@ HTML_TEMPLATE = """
         <div class="card-content">
           <div class="alert-panel" id="alertPanel">⚠️ FIRE DETECTED!</div>
           <div class="button-group">
-            <button class="action-button red" onclick="simulateAlert()">
-              <span>Test Alert</span>
-            </button>
-            <button class="action-button" onclick="acknowledgeAlert()">
-              <span>Acknowledge</span>
-            </button>
-            <button class="action-button" onclick="muteAlerts()">
-              <span>Mute (5min)</span>
-            </button>
+            <form action="/action/simulate_alert" method="POST" style="display:inline;">
+              <button type="submit" class="action-button red">
+                <span>Test Alert</span>
+              </button>
+            </form>
+            <form action="/action/acknowledge_alert" method="POST" style="display:inline;">
+              <button type="submit" class="action-button">
+                <span>Acknowledge</span>
+              </button>
+            </form>
+            <form action="/action/mute_alerts" method="POST" style="display:inline;">
+              <button type="submit" class="action-button">
+                <span>Mute (5min)</span>
+              </button>
+            </form>
           </div>
         </div>
       </div>
@@ -1365,346 +1500,84 @@ HTML_TEMPLATE = """
       PyroSense 2025 © All rights reserved - Python Flask Edition
     </footer>
 
+  <script src="https://unpkg.com/sweetalert/dist/sweetalert.min.js"></script>
   <script>
-    // Dashboard state management
-    let dashboardState = {
-      currentTemperature: {{ current_temperature }},
-      threshold: {{ threshold }},
-      isRecording: {{ is_recording|lower }},
-      nightVision: {{ night_vision|lower }},
-      alertsActive: {{ alerts_active|lower }},
-      autoMode: {{ auto_mode|lower }}
-    };
+    // Display any flashed messages using SweetAlert
+    document.addEventListener('DOMContentLoaded', function(){
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, msg in messages %}
+            // show the sweetalert (category/msg are rendered JSON-safe)
+            (function(c,m){
+              var icon = 'info';
+              if (c == 'success') icon = 'success';
+              else if (c == 'warning') icon = 'warning';
+              else if (c == 'error') icon = 'error';
+              else if (c == 'info') icon = 'info';
+              swal({title: m, icon: icon, button: "OK"});
+            })({{ category|tojson }}, {{ msg|tojson }});
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
 
-    // API communication functions
-    function makeRequest(endpoint, method = 'GET', data = null) {
-      const options = {
-        method: method,
-        headers: {
-          'Content-Type': 'application/json',
-        }
-      };
-      
-      if (data) {
-        options.body = JSON.stringify(data);
-      }
-      
-      return fetch(endpoint, options)
-        .then(response => response.json())
-        .catch(error => {
-          console.error('API Error:', error);
-          alert('Connection to Python server failed!');
-        });
-    }
-
-    // Temperature and time updates
-    function updateDashboard() {
-      makeRequest('/api/status')
-        .then(data => {
-          if (data) {
-            document.getElementById('currentTemp').textContent = data.temperature + '°C';
-            document.getElementById('fireStatus').textContent = data.fire_status;
-            
-            // Update temperature color
-            const tempElement = document.getElementById('currentTemp');
-            if (data.temperature > data.threshold) {
-              tempElement.style.color = '#ff0000';
-              triggerFireAlert();
-            } else if (data.temperature > data.threshold * 0.8) {
-              tempElement.style.color = '#ff8800';
-            } else {
-              tempElement.style.color = '#d62828';
-            }
-            
-            dashboardState.currentTemperature = data.temperature;
-          }
-        });
-    }
-
-    // Interactive functions
-    function toggleRecording() {
-      makeRequest('/api/toggle_recording', 'POST')
-        .then(data => {
-          if (data.success) {
-            const button = document.getElementById('recordButton');
-            if (data.is_recording) {
-              button.textContent = 'Stop Recording';
-              button.classList.add('red');
-            } else {
-              button.textContent = 'Start Recording';
-              button.classList.remove('red');
-            }
-            addLogEntry(data.message);
-          }
-        });
-    }
-
-    function takeSnapshot() {
-      makeRequest('/api/snapshot', 'POST')
-        .then(data => {
-          if (data.success) {
-            addLogEntry(data.message);
-            alert('📸 ' + data.message);
-          }
-        });
-    }
-
-    function toggleNightVision() {
-      makeRequest('/api/toggle_night_vision', 'POST')
-        .then(data => {
-          if (data.success) {
-            const videoFeed = document.getElementById('videoFeed');
-            const button = event.target;
-            
-            if (data.night_vision) {
-              videoFeed.style.background = '#1f3a1d';
-              videoFeed.innerHTML = 'Python Night Vision Active';
-              button.textContent = 'RGB Mode';
-            } else {
-              videoFeed.style.background = '#666';
-              videoFeed.innerHTML = 'Pyrosense is scanning for fire...';
-              button.textContent = 'Thermal/RGB';
-            }
-            addLogEntry(data.message);
-          }
-        });
-    }
-
-    function updateThreshold(value) {
-      makeRequest('/api/update_threshold', 'POST', { threshold: parseInt(value) })
-        .then(data => {
-          if (data.success) {
-            document.getElementById('thresholdValue').textContent = value + '°C';
-            dashboardState.threshold = parseInt(value);
-            addLogEntry(data.message);
-          }
-        });
-    }
-
-    function calibrateSensor() {
-      makeRequest('/api/calibrate_sensor', 'POST')
-        .then(data => {
-          if (data.success) {
-            addLogEntry(data.message);
-            setTimeout(() => {
-              addLogEntry('Python sensor calibration completed');
-            }, 2000);
-          }
-        });
-    }
-
-    function resetThreshold() {
-      makeRequest('/api/reset_threshold', 'POST')
-        .then(data => {
-          if (data.success) {
-            document.getElementById('thresholdSlider').value = 70;
-            document.getElementById('thresholdValue').textContent = '70°C';
-            dashboardState.threshold = 70;
-            addLogEntry(data.message);
-          }
-        });
-    }
-
-    function simulateAlert() {
-      makeRequest('/api/simulate_alert', 'POST')
-        .then(data => {
-          if (data.success) {
-            triggerFireAlert();
-            addLogEntry(data.message);
-          }
-        });
-    }
-
-    function triggerFireAlert() {
-      if (!dashboardState.alertsActive) return;
-      
-      const alertPanel = document.getElementById('alertPanel');
-      const fireStatus = document.getElementById('fireStatus');
-      
-      alertPanel.style.display = 'block';
-      alertPanel.classList.add('active');
-      fireStatus.textContent = 'FIRE DETECTED!';
-      fireStatus.style.color = '#ff0000';
-      
-      // Update the dashboard title
-      document.querySelector('.dashboard-title').textContent = 'DASHBOARD (Test alert)';
-    }
-
-    function acknowledgeAlert() {
-      makeRequest('/api/acknowledge_alert', 'POST')
-        .then(data => {
-          if (data.success) {
-            const alertPanel = document.getElementById('alertPanel');
-            const fireStatus = document.getElementById('fireStatus');
-            
-            alertPanel.style.display = 'none';
-            alertPanel.classList.remove('active');
-            fireStatus.textContent = 'Alert Acknowledged';
-            fireStatus.style.color = '#ffa500';
-            
-            // Update the dashboard title
-            document.querySelector('.dashboard-title').textContent = 'DASHBOARD (Acknowledge)';
-            
-            addLogEntry(data.message);
-          }
-        });
-    }
-
-    function muteAlerts() {
-      makeRequest('/api/mute_alerts', 'POST')
-        .then(data => {
-          if (data.success) {
-            dashboardState.alertsActive = false;
-            addLogEntry(data.message);
-            setTimeout(() => {
-              dashboardState.alertsActive = true;
-              addLogEntry('Python alerts reactivated');
-            }, 300000); // 5 minutes
-          }
-        });
-    }
-
-    function restartSystem() {
-      if (confirm('Are you sure you want to restart the system?')) {
-        makeRequest('/api/restart_system', 'POST')
-          .then(data => {
-            if (data.success) {
-              addLogEntry('System restart initiated...');
-              setTimeout(() => {
-                addLogEntry('System restarted successfully');
-                location.reload();
-              }, 3000);
+      // Confirmation handlers for sensitive actions
+      // Clear log
+      var clearBtn = document.getElementById('clearLogBtn');
+      if (clearBtn){
+        clearBtn.addEventListener('click', function(e){
+          e.preventDefault();
+          swal({
+            title: "Clear log?",
+            text: "This will clear the local detection log. Continue?",
+            icon: "warning",
+            buttons: ["Cancel","Yes, clear"],
+            dangerMode: true
+          }).then((willClear) => {
+            if (willClear) {
+              document.getElementById('clearLogForm').submit();
             }
           });
-      }
-    }
-
-    function clearLog() {
-      makeRequest('/api/clear_log', 'POST')
-        .then(data => {
-          if (data.success) {
-            document.getElementById('logContainer').innerHTML = '<div class="log-entry">' + data.message + '</div>';
-            
-            // Update the dashboard title
-            document.querySelector('.dashboard-title').textContent = 'DASHBOARD (Clear log)';
-          }
         });
-    }
+      }
 
-    function exportLog() {
-      makeRequest('/api/export_log', 'POST')
-        .then(data => {
-          if (data.success) {
-            addLogEntry(data.message);
-            alert('💾 ' + data.message);
-          }
+      // Export log
+      var exportBtn = document.getElementById('exportLogBtn');
+      if (exportBtn){
+        exportBtn.addEventListener('click', function(e){
+          e.preventDefault();
+          swal({
+            title: "Export log?",
+            text: "A plaintext (.txt) file will be downloaded.",
+            icon: "info",
+            buttons: ["Cancel","Export"]
+          }).then((doExport) => {
+            if (doExport) {
+              // direct download via navigation to export URL
+              window.location = "/api/export_log";
+            }
+          });
         });
-    }
-
-    function addLogEntry(message) {
-      const logContainer = document.getElementById('logContainer');
-      const newEntry = document.createElement('div');
-      newEntry.className = 'log-entry';
-      newEntry.textContent = `[${new Date().toLocaleString()}] ${message}`;
-      logContainer.insertBefore(newEntry, logContainer.firstChild);
-      
-      // Keep only last 20 entries
-      while (logContainer.children.length > 20) {
-        logContainer.removeChild(logContainer.lastChild);
       }
-    }
 
-    // Fire model toggle (UI)
-    async function toggleFireModel() {
-      try {
-        const res = await fetch('/api/toggle_fire_model', { method: 'POST' });
-        const data = await res.json();
-        if (data.success) {
-          const btn = document.getElementById('toggleFireBtn');
-          const badge = document.getElementById('streamStatus');
-          if (data.fire_model_enabled) {
-            btn.classList.add('active');
-            btn.textContent = 'Fire: ON';
-            badge.textContent = 'Fire overlay ON';
-            badge.style.background = 'linear-gradient(90deg,#ff6b6b,#ff8a00)';
-          } else {
-            btn.classList.remove('active');
-            btn.textContent = 'Toggle Fire';
-            badge.textContent = 'Scanning for fire...';
-            badge.style.background = '';
-          }
-          addLogEntry(data.message);
-        }
-      } catch (e) {
-        alert('Failed to toggle fire model');
+      // Logout confirmation
+      var logoutBtn = document.getElementById('logoutBtn');
+      if (logoutBtn){
+        logoutBtn.addEventListener('click', function(e){
+          e.preventDefault();
+          swal({
+            title: "Log out?",
+            text: "Are you sure you want to log out?",
+            icon: "warning",
+            buttons: ["Cancel", "Yes, log out"],
+            dangerMode: true
+          }).then((willLogout) => {
+            if (willLogout) {
+              window.location = "/logout_confirm";
+            }
+          });
+        });
       }
-    }
-
-    // Fullscreen toggle
-    function toggleFullscreen() {
-      const el = document.getElementById('videoPlayer');
-      if (!document.fullscreenElement) {
-        if (el.requestFullscreen) el.requestFullscreen();
-        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-        document.getElementById('fullscreenBtn').textContent = 'Exit Fullscreen';
-      } else {
-        if (document.exitFullscreen) document.exitFullscreen();
-        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-        document.getElementById('fullscreenBtn').textContent = 'Fullscreen';
-      }
-    }
-
-    // NEW: Toggle camera feed
-    async function toggleCameraFeed() {
-      try {
-        const res = await fetch('/api/toggle_camera_feed', { method: 'POST' });
-        const data = await res.json();
-        if (data.success) {
-          const btnLabel = document.getElementById('toggleCameraLabel');
-          const stream = document.getElementById('cameraStream');
-          if (data.camera_enabled) {
-            btnLabel.textContent = 'Camera: ON';
-            // reload stream src to restart
-            stream.src = '/video_feed?ts=' + Date.now();
-          } else {
-            btnLabel.textContent = 'Camera: OFF';
-            // show placeholder by reloading src (server will return placeholder while disabled)
-            stream.src = '/video_feed?ts=' + Date.now();
-          }
-          addLogEntry(data.message);
-        }
-      } catch (e) {
-        alert('Failed to toggle camera feed');
-      }
-    }
-
-    // On load: query camera status and set UI state
-    window.addEventListener('load', () => {
-      fetch('/api/camera_feed_status').then(r => r.json()).then(d => {
-        const btnLabel = document.getElementById('toggleCameraLabel');
-        const stream = document.getElementById('cameraStream');
-        if (d.camera_enabled) {
-          btnLabel.textContent = 'Camera: ON';
-          stream.src = '/video_feed?ts=' + Date.now();
-        } else {
-          btnLabel.textContent = 'Camera: OFF';
-          stream.src = '/video_feed?ts=' + Date.now();
-        }
-      }).catch(()=>{});
-      // existing dashboard init
-      initDashboard();
     });
-
-    // Initialize the dashboard
-    function initDashboard() {
-      addLogEntry('PyroSense Dashboard initialized');
-      
-      // Update dashboard every 3 seconds
-      setInterval(updateDashboard, 3000);
-    }
-
-    // Start the dashboard when page loads
-    window.addEventListener('load', initDashboard);
   </script>
 </body>
 </html>
@@ -2020,6 +1893,7 @@ def toggle_recording():
     return jsonify({
         'success': True,
         'is_recording': dashboard_state['is_recording'],
+
         'message': message
     })
 
@@ -2082,136 +1956,263 @@ def reset_threshold():
         'message': message
     })
 
-@app.route('/api/simulate_alert', methods=['POST'])
-def simulate_alert():
-    """Simulate fire alert"""
-    message = 'Python test alert triggered'
-    add_log_entry(message)
-    
-    return jsonify({
-        'success': True,
-        'message': message
-    })
+# --- NEW: server-side form-action endpoints (redirect back with flash messages) ---
+@app.route('/action/toggle_camera', methods=['POST'])
+def action_toggle_camera():
+    if not session.get('user'):
+        flash('Authentication required', 'error')
+        return redirect(url_for('index'))
+    global camera_enabled, video_capture
+    camera_enabled = not camera_enabled
+    stream_ready = False
+    if camera_enabled:
+        # try to open capture immediately
+        with video_lock:
+            try:
+                if video_capture is not None:
+                    try:
+                        video_capture.release()
+                    except:
+                        pass
+                    video_capture = None
+                video_capture = open_capture_with_backends(0, warmup_reads=2)
+                if video_capture is not None and video_capture.isOpened():
+                    try:
+                        video_capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        video_capture.set(cv2.CAP_PROP_FPS, 30)
+                        video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                        video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    except:
+                        pass
+                    try:
+                        ret, _ = video_capture.read()
+                        if ret:
+                            stream_ready = True
+                    except:
+                        stream_ready = bool(video_capture.isOpened())
+            except Exception:
+                stream_ready = False
+    else:
+        with video_lock:
+            try:
+                if video_capture is not None:
+                    video_capture.release()
+            except:
+                pass
+            video_capture = None
+        stream_ready = False
 
-@app.route('/api/acknowledge_alert', methods=['POST'])
-def acknowledge_alert():
-    """Acknowledge fire alert"""
-    message = 'Python alert acknowledged by user'
-    add_log_entry(message)
-    
-    return jsonify({
-        'success': True,
-        'message': message
-    })
+    message = 'Camera feed enabled' if camera_enabled else 'Camera feed disabled'
+    add_log_entry(f"UI: {message} (ready={stream_ready})")
+    flash(message, 'success')
+    return redirect(url_for('index'))
 
-@app.route('/api/mute_alerts', methods=['POST'])
-def mute_alerts():
-    """Mute alerts for 5 minutes"""
+
+
+
+
+
+
+@app.route('/action/toggle_recording', methods=['POST'])
+def action_toggle_recording():
+    if not session.get('user'):
+        flash('Authentication required', 'error')
+        return redirect(url_for('index'))
+
+    global recording_flag, recording_thread, recording_filename
+
+    # Toggle
+    if not recording_flag:
+        # start recording
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        fname = os.path.join(recordings_dir, f"recording_{ts}.mp4")
+        recording_flag = True
+
+        # stop flag accessor
+        stop_ref = lambda: not recording_flag
+
+        # spawn thread
+        t = threading.Thread(target=_recording_loop, args=(fname, stop_ref), daemon=True)
+        recording_thread = t
+        recording_filename = fname
+        t.start()
+        add_log_entry(f"UI: Recording started ({os.path.basename(fname)})")
+        flash('Recording started', 'success')
+    else:
+        # stop recording
+        recording_flag = False
+        # let thread finish; do not block long
+        add_log_entry('UI: Recording stopped by user')
+        flash('Recording stopped', 'success')
+
+    return redirect(url_for('index'))
+
+@app.route('/action/snapshot', methods=['POST'])
+def action_snapshot():
+    if not session.get('user'):
+        flash('Authentication required', 'error')
+        return redirect(url_for('index'))
+    try:
+        cap = get_video_capture()
+        temp_cap_opened = False
+        if cap is None or not getattr(cap, "isOpened", lambda: False)():
+            cap = open_capture_with_backends(0, warmup_reads=2)
+            temp_cap_opened = True
+
+        if cap is None or not getattr(cap, "isOpened", lambda: False)():
+            add_log_entry('Snapshot failed: camera not available')
+            flash('Snapshot failed: camera not available', 'error')
+            return redirect(url_for('index'))
+
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            add_log_entry('Snapshot failed: no frame read')
+            flash('Snapshot failed: no frame read', 'error')
+            return redirect(url_for('index'))
+
+        frame = cv2.flip(frame, 1)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = os.path.join(snapshots_dir, f"snapshot_{ts}.jpg")
+        cv2.imwrite(filename, frame)
+        add_log_entry(f'Python snapshot saved: {os.path.basename(filename)}')
+        flash(f'Snapshot saved: {os.path.basename(filename)}', 'success')
+    except Exception as e:
+        add_log_entry(f'Snapshot error: {e}')
+        flash('Snapshot failed', 'error')
+    finally:
+        try:
+            if temp_cap_opened and cap is not None:
+                cap.release()
+        except:
+            pass
+
+    return redirect(url_for('index'))
+
+@app.route('/action/simulate_alert', methods=['POST'])
+def action_simulate_alert():
+    if not session.get('user'):
+        flash('Authentication required', 'error')
+        return redirect(url_for('index'))
+    # set a manual alert message (kept until acknowledged)
+    dashboard_state['manual_alert'] = 'TEST ALERT: User triggered test'
+    # Do not overwrite model detection state; just mark alerts active
+    dashboard_state['alerts_active'] = True
+    add_log_entry('Python test alert (manual) triggered')
+    flash('Test alert triggered (manual)', 'warning')
+    return redirect(url_for('index'))
+
+@app.route('/action/acknowledge_alert', methods=['POST'])
+def action_acknowledge_alert():
+    if not session.get('user'):
+        flash('Authentication required', 'error')
+        return redirect(url_for('index'))
+
+    # Prefer manual alert message; else use last detections
+    with detection_lock:
+        labels = list(last_detection_summary.get('labels', []))
+    manual = dashboard_state.get('manual_alert')
+    if manual:
+        detected = manual
+    else:
+        detected = ', '.join(labels) if labels else 'Nothing detected'
+
+    message = f'Alert acknowledged. Detected: {detected}'
+    # Acknowledging will clear manual alert and mute overlays
+    dashboard_state['manual_alert'] = None
     dashboard_state['alerts_active'] = False
-    message = 'Python alerts muted for 5 minutes'
+    # keep fire_status (model) unchanged so detection history remains
     add_log_entry(message)
-    
-    return jsonify({
-        'success': True,
-        'message': message
-    })
+    flash(message, 'success')
+    return redirect(url_for('index'))
 
-@app.route('/api/run_diagnostics', methods=['POST'])
-def run_diagnostics():
-    """Run system diagnostics"""
-    return jsonify({
-        'success': True,
-        'checks': ['Python Camera module', 'Python Thermal sensor', 'Python Network connection', 'Python Storage space']
-    })
+# Update mute: keep detection state but suppress overlays
+@app.route('/action/mute_alerts', methods=['POST'])
+def action_mute_alerts():
+    if not session.get('user'):
+        flash('Authentication required', 'error')
+        return redirect(url_for('index'))
+    dashboard_state['alerts_active'] = False
+    message = 'Python alerts muted for 5 minutes (overlays suppressed)'
+    add_log_entry(message)
+    flash(message, 'info')
 
-@app.route('/api/restart_system', methods=['POST'])
-def restart_system():
-    """Restart system"""
+    def _reenable():
+        dashboard_state['alerts_active'] = True
+        add_log_entry('Python alerts reactivated (timer)')
+
+    try:
+        t = threading.Timer(300, _reenable)
+        t.daemon = True
+        t.start()
+    except Exception:
+        pass
+
+    return redirect(url_for('index'))
+
+@app.route('/action/restart_system', methods=['POST'])
+def action_restart_system():
+    if not session.get('user'):
+        flash('Authentication required', 'error')
+        return redirect(url_for('index'))
     message = 'Python system restart initiated...'
     add_log_entry(message)
-    
-    return jsonify({
-        'success': True,
-        'message': message
-    })
+    flash('System restart initiated', 'info')
+    return redirect(url_for('index'))
 
-@app.route('/api/toggle_auto_mode', methods=['POST'])
-def toggle_auto_mode():
-    """Toggle auto mode"""
-    dashboard_state['auto_mode'] = not dashboard_state['auto_mode']
-    message = 'Python auto mode enabled' if dashboard_state['auto_mode'] else 'Python manual mode enabled'
-    add_log_entry(message)
-    
-    return jsonify({
-        'success': True,
-        'auto_mode': dashboard_state['auto_mode'],
-        'message': message
-    })
+@app.route('/logout_confirm')
+def logout_confirm():
+	# perform actual logout (used after SweetAlert confirmation)
+	session.clear()
 
-@app.route('/api/clear_log', methods=['POST'])
-def clear_log():
-    """Clear system log"""
-    dashboard_state['log_entries'] = []
-    message = f'[{datetime.now().strftime("%m/%d/%Y %H:%M:%S")}] Python log cleared by user'
-    dashboard_state['log_entries'].append(message)
-    
-    return jsonify({
-        'success': True,
-        'message': message
-    })
+	# Build a small page styled to match the dashboard font and set a short-lived cookie
+	html = """<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Logged out</title>
+  <script src="https://unpkg.com/sweetalert/dist/sweetalert.min.js"></script>
+  <style>
+    /* Use same UI font as dashboard so modal text matches */
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin:0; padding:0; background:#f4f4f4; height:100vh; display:flex; align-items:center; justify-content:center; }
+  </style>
+</head>
+<body>
+<script>
+  // show logout message, then redirect to login
+  swal({
+    title: "Logged out",
+    text: "You have been logged out successfully.",
+    icon: "info",
+    button: "Go to Login"
+  }).then(function(){
+    window.location.href = "http://localhost:5000/login";
+  });
+  // fallback redirect after 6s
+  setTimeout(function(){ window.location.href = "http://localhost:5000/login"; }, 6000);
+</script>
+</body>
+</html>"""
 
-@app.route('/api/export_log', methods=['POST'])
+	# Set a short-lived cookie so an external login page (if it checks) can detect logout
+	resp = make_response(render_template_string(html))
+	resp.set_cookie('pyrosense_logged_out', '1', max_age=10, path='/')
+	return resp
+
+# Modify export_log to accept GET so browser can download directly (no client AJAX)
+@app.route('/api/export_log', methods=['GET', 'POST'])
 def export_log():
-    """Export system log"""
-    message = 'Python log export requested'
-    add_log_entry(message)
-    
-    return jsonify({
-        'success': True,
-        'message': 'Python log exported to downloads folder!'
-    })
+    """Export system log as a downloadable TXT file (supports GET for direct download)"""
+    if not session.get('user'):
+        flash('Authentication required', 'error')
+        return redirect(url_for('index'))
 
-@app.route('/api/emergency_shutdown', methods=['POST'])
-def emergency_shutdown():
-    """Emergency system shutdown"""
-    message = '🛑 PYTHON EMERGENCY SHUTDOWN INITIATED'
-    add_log_entry(message)
-    
-    return jsonify({
-        'success': True,
-        'message': message
-    })
-
-@app.route('/logout')
-def logout():
-    """Handle user logout"""
-    # Clear the session
-    session.clear()
-    # Redirect to login page
-    return redirect('http://localhost:5000/login')
-
-@app.route('/forgot-password', methods=['GET', 'POST'])
-def forgot_password():
-    """Handle forgot password page display and form submission"""
-    error = None
-    success = None
-    
-    if request.method == 'POST':
-        # No actual email sending - this is UI only demo
-        email = request.form.get('email')
-        
-       
-        
-        # Simulate email sending
-        add_log_entry(f'Password reset email sent to {email}')
-        success = 'Password reset email sent!'
-    
-    return render_template_string(FORGOT_PASSWORD_TEMPLATE, error=error, success=success)
-
-@app.route('/history')
-def history():
-    """Redirect to history page"""
-    return redirect('http://localhost:5001')  # Redirect to history Flask app
+    txt = "\r\n".join(reversed(dashboard_state.get('log_entries', [])))
+    filename = f"pyrosense_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    resp = Response(txt, mimetype='text/plain; charset=utf-8')
+    resp.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    add_log_entry('Python log exported to download')
+    # If called via GET or direct link, return the file.
+    return resp
 
 # --- ADDED: debug API to report model files / class count to UI ---
 @app.route('/api/fire_model_info')
@@ -2229,6 +2230,20 @@ def api_fire_model_info():
         'fire_model_enabled': fire_model_enabled
     })
     
+# add missing clear-log endpoint so /action/clear_log won't 404
+@app.route('/action/clear_log', methods=['GET', 'POST'])
+def action_clear_log():
+    """Clear the in-memory log. Accepts GET and POST to avoid 404s from direct navigation."""
+    if not session.get('user'):
+        flash('Authentication required', 'error')
+        return redirect(url_for('index'))
+    dashboard_state['log_entries'] = []
+    message = f'[{datetime.now().strftime("%m/%d/%Y %H:%M:%S")}] Python log cleared by user'
+    dashboard_state['log_entries'].append(message)
+    add_log_entry('User cleared the log')
+    flash('Log cleared', 'success')
+    return redirect(url_for('index'))
+
 if __name__ == '__main__':
     print("🐍 Starting PyroSense Python Flask Dashboard...")
     print("🔥 Fire Detection System - Python Edition")
