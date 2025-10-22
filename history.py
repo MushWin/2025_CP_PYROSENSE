@@ -11,6 +11,7 @@ import json
 import csv
 import io
 import os
+import zipfile
 
 # Use a consistent secret key across both applications
 app = Flask(__name__)
@@ -1160,7 +1161,7 @@ HTML_TEMPLATE = """
     <div class="records-card">
       <div class="records-header">
         <h2 class="records-title">Historical Fire Detection Records</h2>
-        <span class="records-count">{{ records|length }} records</span>
+        <span class="records-count">{{ total_records }} records</span>
       </div>
       
       <table class="records-table">
@@ -1209,21 +1210,21 @@ HTML_TEMPLATE = """
     <div class="pagination">
       {% if total_pages > 1 %}
         {% if current_page > 1 %}
-          <button class="pagination-button" data-page="{{ current_page - 1 }}">←</button>
+          <a class="pagination-button" href="?page={{ current_page - 1 }}">←</a>
         {% endif %}
         
         {% for page_num in range(1, total_pages + 1) %}
           {% if page_num == current_page %}
-            <button class="pagination-button active">{{ page_num }}</button>
+            <span class="pagination-button active">{{ page_num }}</span>
           {% elif page_num == 1 or page_num == total_pages or (page_num >= current_page - 1 and page_num <= current_page + 1) %}
-            <button class="pagination-button" data-page="{{ page_num }}">{{ page_num }}</button>
+            <a class="pagination-button" href="?page={{ page_num }}">{{ page_num }}</a>
           {% elif page_num == current_page - 2 or page_num == current_page + 2 %}
-            <button class="pagination-button">...</button>
+            <span class="pagination-button">...</span>
           {% endif %}
         {% endfor %}
         
         {% if current_page < total_pages %}
-          <button class="pagination-button" data-page="{{ current_page + 1 }}">→</button>
+          <a class="pagination-button" href="?page={{ current_page + 1 }}">→</a>
         {% endif %}
       {% endif %}
     </div>
@@ -1301,6 +1302,9 @@ HTML_TEMPLATE = """
       </div>
     </div>
   </div>
+
+  <!-- include SweetAlert -->
+  <script src="https://unpkg.com/sweetalert/dist/sweetalert.min.js"></script>
 
   <script>
     // Enhanced Calendar Modal System - COMPLETELY FIXED
@@ -1845,53 +1849,93 @@ HTML_TEMPLATE = """
       setupDropdowns();
     });
 
-    // Action button functionality
-    document.getElementById('refreshData').addEventListener('click', function() {
-      location.reload();
-    });
+    // Action button functionality (SweetAlert enhancements)
+    (function(){
+      const safe = (id) => document.getElementById(id);
 
-    document.getElementById('exportCsv').addEventListener('click', function() {
-      window.open('/api/export/csv', '_blank');
-    });
+      const refreshBtn = safe('refreshData');
+      if (refreshBtn) {
+        refreshBtn.addEventListener('click', function(){
+          swal({
+            title: "Refresh data?",
+            text: "This will reload the page and refresh the displayed data.",
+            icon: "info",
+            buttons: ["Cancel","Refresh"],
+            dangerMode: false
+          }).then(ok => { if (ok) location.reload(); });
+        });
+      }
 
-    document.getElementById('exportJson').addEventListener('click', function() {
-      window.open('/api/export/json', '_blank');
-    });
+      const exportCsv = safe('exportCsv');
+      if (exportCsv) {
+        exportCsv.addEventListener('click', function(){
+          swal({
+            title: "Export CSV?",
+            text: "A CSV file will be downloaded containing the current filtered records.",
+            icon: "info",
+            buttons: ["Cancel","Export"],
+          }).then(ok => { if (ok) window.open('/api/export/csv', '_blank'); });
+        });
+      }
 
-    document.getElementById('clearFilters').addEventListener('click', function() {
-      // Clear all filter dropdowns
-      document.getElementById('minTemperature').value = '';
-      document.getElementById('maxTemperature').value = '';
-      document.getElementById('alertLevel').value = '';
-      document.getElementById('fireDetection').value = '';
-      document.getElementById('startDate').value = '';
-      document.getElementById('endDate').value = '';
-      
-      // Clear URL parameters
-      const url = new URL(window.location);
-      url.search = '';
-      window.history.replaceState({}, '', url);
-      
-      alert('Filters cleared!');
-    });
+      const exportJson = safe('exportJson');
+      if (exportJson) {
+        exportJson.addEventListener('click', function(){
+          swal({
+            title: "Export JSON?",
+            text: "A JSON file will be downloaded containing the current filtered records.",
+            icon: "info",
+            buttons: ["Cancel","Export"],
+          }).then(ok => { if (ok) window.open('/api/export/json', '_blank'); });
+        });
+      }
 
-    document.getElementById('generateReport').addEventListener('click', function() {
-      alert('Report generation feature would be implemented here in a full version.');
-    });
-    
-    // Pagination functionality
-    document.querySelectorAll('.pagination-button[data-page]').forEach(button => {
-      button.addEventListener('click', function() {
-        const page = this.dataset.page;
-        
-        // Create URL with current parameters plus new page
-        const url = new URL(window.location);
-        url.searchParams.set('page', page);
-        
-        // Navigate to the new page
-        window.location.href = url.toString();
-      });
-    });
+      const clearBtn = safe('clearFilters');
+      if (clearBtn) {
+        clearBtn.addEventListener('click', function(){
+          swal({
+            title: "Clear filters?",
+            text: "This will reset all filters and URL parameters.",
+            icon: "warning",
+            buttons: ["Cancel","Clear"],
+            dangerMode: true
+          }).then(ok => {
+            if (!ok) return;
+            // Clear all filter fields
+            const ids = ['minTemperature','maxTemperature','alertLevel','fireDetection','startDate','endDate'];
+            ids.forEach(i => { const el = document.getElementById(i); if (el) el.value = ''; });
+            const url = new URL(window.location);
+            url.search = '';
+            window.history.replaceState({}, '', url);
+            swal("Filters cleared", { icon: "success", timer: 1500, buttons: false });
+          });
+        });
+      }
+
+      const genBtn = safe('generateReport');
+      if (genBtn) {
+        genBtn.addEventListener('click', function(){
+          swal({
+            title: "Generate report?",
+            text: "A ZIP (CSV + JSON + summary) will be generated and downloaded using current filters.",
+            icon: "info",
+            buttons: ["Cancel","Generate"]
+          }).then(ok => {
+            if (ok) {
+              // Use current URL search (server endpoints accept same query params)
+              const url = '/api/generate_report' + window.location.search;
+              // Show brief info then start download in a new tab/window
+              swal({title: "Generating...", text: "Preparing report...", icon: "info", buttons: false, timer: 900});
+              // Trigger download
+              window.open(url, '_blank');
+            }
+          });
+        });
+      }
+    })();
+
+    // Pagination: using server-side anchors (href="?page=N"), no JS click handler required.
+
   </script>
 </body>
 </html>
@@ -1975,16 +2019,29 @@ def root():
             </html>
         """)
     
-    # Get recent 10 records for initial display
-    recent_data = historical_data[:10]
+    # Server-side pagination
+    try:
+        page = int(request.args.get('page', 1))
+    except Exception:
+        page = 1
+    per_page = 10
+    total_records = len(historical_data)
+    total_pages = (total_records + per_page - 1) // per_page if total_records > 0 else 1
+    if page < 1:
+        page = 1
+    if page > total_pages:
+        page = total_pages
+
+    start_idx = (page - 1) * per_page
+    recent_data = historical_data[start_idx:start_idx + per_page]
     stats = calculate_statistics(historical_data)
-    
-    return render_template_string(HTML_TEMPLATE, 
+
+    return render_template_string(HTML_TEMPLATE,
                                 records=recent_data,
                                 stats=stats,
-                                total_records=len(historical_data),
-                                current_page=1,
-                                total_pages=(len(historical_data) + 9) // 10,
+                                total_records=total_records,
+                                current_page=page,
+                                total_pages=total_pages,
                                 username=session.get('name', 'User'))
 
 # Update the root route to show the dashboard directly
@@ -2123,6 +2180,81 @@ def get_statistics():
         
     stats = calculate_statistics(historical_data);
     return jsonify(stats);
+
+# --- New: generate a ZIP "report" containing CSV + JSON + summary ---
+@app.route('/api/generate_report')
+def api_generate_report():
+    """Generate a ZIP report (CSV + JSON + summary) using the same filters as the page (query params)."""
+    if not session.get('user'):
+        return jsonify({'error': 'Authentication required'}), 401
+
+    # collect filters from request.args (same as other endpoints)
+    filters = {k: v for k, v in request.args.items() if v}
+    filtered = filter_data(historical_data, filters)
+
+    # CSV content
+    csv_buf = io.StringIO()
+    csv_writer = csv.writer(csv_buf)
+    csv_writer.writerow(['Timestamp', 'Temperature', 'Fire Detected', 'Alert Level',
+                         'Location', 'Confidence', 'Camera Status', 'Thermal Status'])
+    for r in filtered:
+        csv_writer.writerow([
+            r['timestamp'],
+            r['temperature'],
+            'Yes' if r['fire_detected'] else 'No',
+            r['alert_level'],
+            r['location'],
+            f"{r['confidence']:.2f}",
+            r['camera_status'],
+            r['thermal_status']
+        ])
+    csv_data = csv_buf.getvalue().encode('utf-8')
+
+    # JSON content
+    export_data = {
+        'export_info': {
+            'generated_at': datetime.now().isoformat(),
+            'total_records': len(filtered),
+            'filters_applied': filters,
+            'system': 'PyroSense Python Edition'
+        },
+        'statistics': calculate_statistics(filtered),
+        'records': filtered
+    }
+    json_data = json.dumps(export_data, indent=2).encode('utf-8')
+
+    # Summary text
+    stats = calculate_statistics(filtered)
+    summary_lines = [
+        f"PyroSense Report - Generated: {datetime.now().isoformat()}",
+        f"Filters: {json.dumps(filters) if filters else 'None'}",
+        f"Total records: {len(filtered)}",
+        f"Total fires: {stats.get('total_fires', 0)}",
+        f"Average temperature: {stats.get('avg_temperature', 0)}",
+        f"Total alerts: {stats.get('total_alerts', 0)}",
+        "",
+        "This ZIP contains:",
+        " - report.csv (CSV export)",
+        " - report.json (JSON export with metadata)",
+        " - summary.txt (this summary)",
+    ]
+    summary_data = ("\r\n".join(summary_lines)).encode('utf-8')
+
+    # Build ZIP in-memory
+    zip_buffer = io.BytesIO();
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('report.csv', csv_data);
+        zf.writestr('report.json', json_data);
+        zf.writestr('summary.txt', summary_data);
+
+    zip_buffer.seek(0);
+    filename = f'pyrosense_report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.zip';
+    return send_file(
+        zip_buffer,
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name=filename
+    );
 
 # Add this route before the if __name__ == '__main__' block
 @app.route('/dashboard')

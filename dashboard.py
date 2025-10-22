@@ -740,6 +740,27 @@ def api_camera_feed_status():
         return jsonify({'error':'Authentication required'}), 401
     return jsonify({'camera_enabled': camera_enabled})
 
+# API to force-disable camera (used before navigating to History)
+@app.route('/api/disable_camera', methods=['POST'])
+def api_disable_camera():
+    if not session.get('user'):
+        return jsonify({'error': 'Authentication required'}), 401
+    global camera_enabled, video_capture
+    with video_lock:
+        try:
+            camera_enabled = False
+            if video_capture is not None:
+                try:
+                    video_capture.release()
+                except:
+                    pass
+                video_capture = None
+            add_log_entry('UI: Camera disabled (navigation to history)')
+            return jsonify({'success': True, 'camera_enabled': camera_enabled})
+        except Exception as e:
+            add_log_entry(f'Camera disable error: {e}')
+            return jsonify({'success': False, 'error': str(e)}), 500
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -1316,7 +1337,7 @@ HTML_TEMPLATE = """
         <div class="header-right">
           <span class="badge python-badge">Made with Python Flask</span>
           <span class="badge system-badge">System Online</span>
-          <a href="/history" class="history-button">📊 HISTORY</a>
+          <a href="http://localhost:5001/history" class="history-button">📊 HISTORY</a>
           <a href="#" id="logoutBtn" class="logout-button">🚪 LOGOUT</a>
         </div>
       </div>
@@ -1540,6 +1561,21 @@ HTML_TEMPLATE = """
         });
       }
 
+      // Ensure camera is turned OFF before navigating to History (prevents camera staying active)
+      var historyBtn = document.querySelector('.history-button');
+      if (historyBtn){
+        historyBtn.addEventListener('click', function(e){
+          e.preventDefault();
+          var href = historyBtn.href;
+          // best-effort disable on server, then navigate
+          fetch('/api/disable_camera', {method: 'POST', credentials: 'same-origin'})
+            .catch(function(){ /* ignore errors but still navigate */ })
+            .finally(function(){
+              window.location = href;
+            });
+        });
+      }
+
       // Export log
       var exportBtn = document.getElementById('exportLogBtn');
       if (exportBtn){
@@ -1577,6 +1613,61 @@ HTML_TEMPLATE = """
           });
         });
       }
+    });
+  </script>
+  <script>
+    // Fullscreen helper for the live camera container
+    // Toggles fullscreen on the #videoPlayer element and updates the button label/state.
+    function toggleFullscreen() {
+      try {
+        const container = document.getElementById('videoPlayer');
+        const btn = document.getElementById('fullscreenBtn');
+        if (!container) return;
+
+        const isInFs = !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+        if (!isInFs) {
+          if (container.requestFullscreen) container.requestFullscreen();
+          else if (container.webkitRequestFullscreen) container.webkitRequestFullscreen();
+          else if (container.msRequestFullscreen) container.msRequestFullscreen();
+        } else {
+          if (document.exitFullscreen) document.exitFullscreen();
+          else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+          else if (document.msExitFullscreen) document.msExitFullscreen();
+        }
+        // Button text will be updated by the fullscreenchange handler below.
+      } catch (err) {
+        console.error('toggleFullscreen error', err);
+      }
+    }
+
+    // Update fullscreen button label/state when fullscreen changes
+    function _updateFullscreenButton() {
+      const btn = document.getElementById('fullscreenBtn');
+      if (!btn) return;
+      const inFs = !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+      btn.classList.toggle('active', inFs);
+      btn.textContent = inFs ? 'Exit Fullscreen' : 'Fullscreen';
+    }
+
+    // Listen for vendor-neutral and vendor-prefixed fullscreen change events
+    document.addEventListener('fullscreenchange', _updateFullscreenButton);
+    document.addEventListener('webkitfullscreenchange', _updateFullscreenButton);
+    document.addEventListener('msfullscreenchange', _updateFullscreenButton);
+
+    // Support pressing "F" to toggle fullscreen as a convenience
+    document.addEventListener('keydown', function(e) {
+      // ignore when focus is in an input/textarea to avoid interfering with typing
+      const tag = (document.activeElement && document.activeElement.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        toggleFullscreen();
+      }
+    });
+
+    // Ensure button is initialized correctly on page load
+    document.addEventListener('DOMContentLoaded', function(){
+      _updateFullscreenButton();
     });
   </script>
 </body>
@@ -1901,6 +1992,7 @@ def toggle_recording():
 def take_snapshot():
     """Take a snapshot"""
     add_log_entry('Python snapshot captured')
+   
     return jsonify({
         'success': True,
         'message': 'Snapshot saved to Python gallery!'
@@ -2006,12 +2098,6 @@ def action_toggle_camera():
     add_log_entry(f"UI: {message} (ready={stream_ready})")
     flash(message, 'success')
     return redirect(url_for('index'))
-
-
-
-
-
-
 
 @app.route('/action/toggle_recording', methods=['POST'])
 def action_toggle_recording():
