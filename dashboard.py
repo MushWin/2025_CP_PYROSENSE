@@ -15,8 +15,6 @@ import numpy as np  # ADDED: NumPy for image processing
 import os  # ADDED: missing os import used by model file helpers
 import glob
 import pathlib
-import urllib.request
-import urllib.error
 
 app = Flask(__name__)
 # Add the same secret key as login.py for shared sessions
@@ -86,77 +84,6 @@ recording_writer = None
 
 # Manual alert (set by Test Alert) — displayed separately from model detections
 dashboard_state.setdefault('manual_alert', None)
-
-# --- NEW: Raspberry Pi connection configuration + simple HTTP helpers/proxy ---
-# Set these via environment variables if you need to change them
-PI_HOST = os.environ.get("PI_HOST", "192.168.1.110")
-PI_THERMAL_PORT = int(os.environ.get("PI_THERMAL_PORT", "8055"))
-PI_HLS_PATH = os.environ.get("PI_HLS_PATH", "/pyrosense/stream.m3u8")
-# NEW: thermal HLS path (if your thermal cam streams HLS)
-PI_THERMAL_HLS_PATH = os.environ.get("PI_THERMAL_HLS_PATH", "/pyrosense/thermal_stream.m3u8")
-PI_SNAPSHOT_PATH = os.environ.get("PI_SNAPSHOT_PATH", "/cam.jpg")
-PI_REQUEST_TIMEOUT = float(os.environ.get("PI_REQUEST_TIMEOUT", "0.9"))
-
-def _rebuild_pi_urls():
-    global HLS_URL, THERMAL_PNG, THERMAL_JSON, THERMAL_HLS_URL
-    HLS_URL = f"http://{PI_HOST}{PI_HLS_PATH}"
-    THERMAL_PNG = f"http://{PI_HOST}:{PI_THERMAL_PORT}/thermal.png"
-    THERMAL_JSON = f"http://{PI_HOST}:{PI_THERMAL_PORT}/thermal.json"
-    # NEW: build thermal HLS URL (may be same host but different path/port)
-    THERMAL_HLS_URL = f"http://{PI_HOST}{PI_THERMAL_HLS_PATH}"
-
-_rebuild_pi_urls()
-
-def _fetch_bytes(url, timeout=PI_REQUEST_TIMEOUT):
-    """Return (bytes, headers) or (None, None) on failure."""
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'PyroSense-Dashboard/1.0'})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read(), getattr(r, 'headers', None)
-    except Exception:
-        return None, None
-
-def fetch_pi_snapshot(timeout=PI_REQUEST_TIMEOUT):
-    path = PI_SNAPSHOT_PATH if PI_SNAPSHOT_PATH.startswith('/') else '/' + PI_SNAPSHOT_PATH
-    url = f"http://{PI_HOST}:{PI_THERMAL_PORT}{path}"
-    data, _ = _fetch_bytes(url, timeout=timeout)
-    # basic JPEG sanity check
-    if data and data[:2] == b'\xff\xd8':
-        return data
-    return None
-
-# Proxy endpoints to avoid CORS / mixed-content issues when dashboard fetches Pi images
-@app.route('/api/thermal_image')
-def proxy_thermal_image():
-    """Proxy MLX thermal PNG from the Pi so browser can fetch without CORS."""
-    try:
-        data, headers = _fetch_bytes(THERMAL_PNG, timeout=1.2)
-        if not data:
-            return jsonify({'error': 'thermal_unavailable'}), 502
-        ctype = 'image/png'
-        try:
-            if headers and hasattr(headers, 'get_content_type'):
-                ctype = headers.get_content_type()
-        except Exception:
-            pass
-        resp = Response(data, mimetype=ctype)
-        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-        return resp
-    except Exception as e:
-        return jsonify({'error': 'thermal_proxy_error', 'detail': str(e)}), 502
-
-@app.route('/api/pi_snapshot')
-def api_pi_snapshot():
-    """Proxy Pi camera single-frame JPEG snapshot (no auth)."""
-    try:
-        data = fetch_pi_snapshot(timeout=1.2)
-        if not data:
-            return jsonify({'error': 'snapshot_unavailable'}), 502
-        resp = Response(data, mimetype='image/jpeg')
-        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-        return resp
-    except Exception as e:
-        return jsonify({'error': 'snapshot_proxy_error', 'detail': str(e)}), 502
 
 # Helper: locate model files in common locations (returns dict with keys 'cfg','weights','names' or {} if none)
 def find_fire_model_files(model_dirs=None):
@@ -1429,26 +1356,7 @@ HTML_TEMPLATE = """
             <div class="video-topbar">
               <div class="video-badge" id="streamStatus">Scanning for fire...</div>
             </div>
-            <div id="cameraContainer" style="position:relative;width:100%;height:100%;">
-              <!-- HLS (Pi main camera) - hidden until available -->
-              <video id="liveHls" controls playsinline muted
-                     style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;border-radius:12px;display:none;"></video>
-
-              <!-- MJPEG fallback served by this app -->
-              <img id="cameraStream" class="stream" src="/video_feed" alt="Live camera stream"
-                   style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;border-radius:12px;background:#000;" />
-
-              <!-- Thermal HLS or proxied thermal thumbnail -->
-              <div style="position:absolute;right:12px;top:12px;z-index:25;display:flex;flex-direction:column;gap:8px;">
-                <video id="thermalHls" playsinline muted loop autoplay
-                       style="width:180px;height:120px;border-radius:8px;border:2px solid rgba(255,255,255,0.6);object-fit:cover;display:none;"></video>
-                <img id="thermalPreview" src="{{ thermal_png }}" alt="Thermal preview"
-                     style="width:180px;height:120px;border-radius:8px;border:2px solid rgba(255,255,255,0.6);object-fit:cover;box-shadow:0 6px 18px rgba(0,0,0,0.35);" />
-                <img id="piSnapshot" src="{{ pi_snapshot }}" alt="Pi Cam snapshot"
-                     style="width:140px;height:90px;border-radius:8px;border:2px solid rgba(255,255,255,0.5);object-fit:cover;box-shadow:0 6px 12px rgba(0,0,0,0.25);" />
-              </div>
-            </div>
-
+            <img id="cameraStream" class="stream" src="/video_feed" alt="Live camera stream">
             <div class="video-controls">
               <!-- Removed Toggle Fire button and Minimize button per request -->
               <button class="video-control-btn" id="fullscreenBtn" onclick="toggleFullscreen()">Fullscreen</button>
@@ -1494,16 +1402,6 @@ HTML_TEMPLATE = """
           <h2 class="card-title">Thermal Reading</h2>
         </div>
         <div class="card-content">
-          <!-- ADDED: Thermal visual (HLS primary, image fallback) -->
-          <div style="margin-bottom:12px;">
-            <div style="width:100%;border-radius:12px;overflow:hidden;background:#000;box-shadow:0 8px 20px rgba(0,0,0,0.25);">
-              <video id="thermalHls_main" playsinline muted loop
-                     style="width:100%;height:220px;object-fit:cover;display:none;"></video>
-              <img id="thermalPreviewMain" src="{{ thermal_png }}" alt="Thermal preview"
-                   style="width:100%;height:220px;object-fit:cover;display:block;" />
-            </div>
-          </div>
-
           <div class="temperature-display" id="currentTemp">{{ current_temperature }}°C</div>
           <div class="threshold-info">Heat Threshold: <strong id="thresholdValue">{{ threshold }}°C</strong></div>
           <div class="slider-container">
@@ -1772,87 +1670,6 @@ HTML_TEMPLATE = """
       _updateFullscreenButton();
     });
   </script>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
-  <script>
-(function(){
-  try {
-    const hlsUrl = "{{ hls_url }}";
-    const thermalHlsUrl = "{{ thermal_hls_url }}";
-    const videoEl = document.getElementById('liveHls');
-    const thermalEl = document.getElementById('thermalHls');        // small preview (existing)
-    const thermalElMain = document.getElementById('thermalHls_main'); // NEW main thermal view
-    const imgFallback = document.getElementById('cameraStream');
-    const thermalImg = document.getElementById('thermalPreview');
-    const thermalImgMain = document.getElementById('thermalPreviewMain');
-
-    function attachHls(url, el, imgFallbackEl, onSuccess, onFail){
-      if (!url || url === 'None') { onFail && onFail(); return; }
-      if (el && el.canPlayType && el.canPlayType('application/vnd.apple.mpegurl')) {
-        el.src = url;
-        el.style.display = 'block';
-        if (imgFallbackEl) imgFallbackEl.style.display = 'none';
-        onSuccess && onSuccess();
-        el.play().catch(()=>{});
-      } else if (window.Hls && Hls.isSupported()) {
-        try {
-          const hls = new Hls({ liveSyncDuration: 4, maxBufferLength: 10, fragLoadingMaxRetry: 3, enableWorker: true });
-          hls.loadSource(url);
-          hls.attachMedia(el);
-          hls.on(Hls.Events.MANIFEST_PARSED, function() {
-            el.style.display = 'block';
-            if (imgFallbackEl) imgFallbackEl.style.display = 'none';
-            onSuccess && onSuccess();
-            el.play().catch(()=>{});
-          });
-          hls.on(Hls.Events.ERROR, function(event, data) {
-            if (data && data.fatal) {
-              try { hls.destroy(); } catch(e){}
-              onFail && onFail();
-            }
-          });
-        } catch (e) {
-          onFail && onFail();
-        }
-      } else {
-        onFail && onFail();
-      }
-    }
-
-    // Try to start main Pi HLS; if it works hide MJPEG fallback
-    attachHls(hlsUrl, videoEl, document.getElementById('cameraStream'),
-      function onOk(){ if (imgFallback) imgFallback.style.display = 'none'; },
-      function onFail(){ if (videoEl) videoEl.style.display = 'none'; if (imgFallback) imgFallback.style.display = 'block'; }
-    );
-
-    // Try thermal HLS small preview (existing) and main thermal view
-    attachHls(thermalHlsUrl, thermalEl, thermalImg,
-      function onOk(){ thermalImg.style.display='none'; thermalEl.style.display='block'; },
-      function onFail(){ thermalEl.style.display='none'; thermalImg.style.display='block'; }
-    );
-
-    // Also attempt to attach thermal stream into the larger Thermal Reading area (if available)
-    attachHls(thermalHlsUrl, thermalElMain, thermalImgMain,
-      function onOk(){ thermalImgMain.style.display='none'; thermalElMain.style.display='block'; },
-      function onFail(){ thermalElMain.style.display='none'; thermalImgMain.style.display='block'; }
-    );
-
-  } catch (e) {
-    console.warn('HLS init error', e);
-  }
-
-  // refresh proxied thermal thumbnail and pi snapshot to avoid caching/CORS problems
-  (function refreshPreviews(){
-    const thermalElImg = document.getElementById('thermalPreview');
-    const snapEl = document.getElementById('piSnapshot');
-    const thermalElImgMain = document.getElementById('thermalPreviewMain');
-    const t = Date.now();
-    if (thermalElImg) thermalElImg.src = "/api/thermal_image?t=" + t;
-    if (thermalElImgMain) thermalElImgMain.src = "/api/thermal_image?t=" + t;
-    if (snapEl) snapEl.src = "/api/pi_snapshot?t=" + t;
-    setTimeout(refreshPreviews, 3000);
-  })();
-})();
-</script>
 </body>
 </html>
 """
@@ -2134,13 +1951,7 @@ def dashboard():
         'system_status': dashboard_state['system_status'],
         'log_entries': dashboard_state['log_entries'][:10],  # Show only recent 10
         'last_update': datetime.now().strftime('%m/%d/%Y %H:%M:%S'),
-        'username': session.get('name', 'User'),  # Add username from session
-
-        # NEW: expose HLS URLs and proxied thermal/image endpoints to the template JS
-        'hls_url': HLS_URL,
-        'thermal_hls_url': THERMAL_HLS_URL,
-        'thermal_png': '/api/thermal_image',
-        'pi_snapshot': '/api/pi_snapshot'
+        'username': session.get('name', 'User')  # Add username from session
     }
     return render_template_string(HTML_TEMPLATE, **template_data)
 
@@ -2358,7 +2169,7 @@ def action_snapshot():
         try:
             if temp_cap_opened and cap is not None:
                 cap.release()
-        except Exception:
+        except:
             pass
 
     return redirect(url_for('index'))
@@ -2395,7 +2206,6 @@ def action_acknowledge_alert():
     # Acknowledging will clear manual alert and mute overlays
     dashboard_state['manual_alert'] = None
     dashboard_state['alerts_active'] = False
-
     # keep fire_status (model) unchanged so detection history remains
     add_log_entry(message)
     flash(message, 'success')
