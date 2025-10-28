@@ -15,6 +15,8 @@ import numpy as np  # ADDED: NumPy for image processing
 import os  # ADDED: missing os import used by model file helpers
 import glob
 import pathlib
+import sys            # <-- NEW
+import socket         # <-- NEW
 
 app = Flask(__name__)
 # Add the same secret key as login.py for shared sessions
@@ -31,7 +33,7 @@ dashboard_state = {
     'fire_status': 'No fire detected',
     'system_status': {
         'camera': 'Online',
-        'thermal': 'OK', 
+        'thermal': 'Offline',   # always Offline unless you implement it
         'edge': 'Running',
         'internet': 'Connected'
     },
@@ -317,6 +319,8 @@ def load_fire_model():
 	files = find_fire_model_files()
 	if not files:
 		add_log_entry("Fire model: model folder not found (no cfg/weights/names discovered)")
+		# update thermal sensor status
+		dashboard_state['system_status']['thermal'] = 'Unavailable'
 		return False
 	cfg = files.get('cfg')
 	weights = files.get('weights')
@@ -366,20 +370,36 @@ def load_fire_model():
 		add_log_entry(f"Fire model loaded: {os.path.basename(weights)} ({len(classes)} classes) - names:{os.path.basename(names)}")
 		# Enable overlay automatically when the model successfully loads (so boxes appear without extra toggle)
 		fire_model_enabled = True
+
+		# Update thermal sensor status to indicate model-backed sensor available
+		dashboard_state['system_status']['thermal'] = 'OK'
 		return True
 	except Exception as e:
 		add_log_entry(f"Fire model load failed: {e}")
 		fire_model_loaded = False
+		# Reflect thermal sensor problem in status panel
+		dashboard_state['system_status']['thermal'] = 'Unavailable'
 		return False
 
+# --- UPDATED: remove automatic model load at definition-time ---
 # Attempt to load at startup (non-blocking attempt) and enable overlay if successful
-try:
-	_ok = load_fire_model()
-	# load_fire_model sets fire_model_enabled True on success; ensure it's set here as well for clarity
-	if _ok:
-		fire_model_enabled = True
-except Exception:
-	pass
+# try:
+# 	_ok = load_fire_model()
+# 	# load_fire_model sets fire_model_enabled True on success; ensure it's set here as well for clarity
+# 	if _ok:
+# 		fire_model_enabled = True
+# except Exception:
+# 	pass
+
+# --- ADDED: safe startup attempt to load model (after logging and background thread exist) ---
+# REMOVE automatic model load here as well so thermal stays Offline until explicitly loaded.
+# (delete or comment out the block below if present)
+# try:
+#     loaded = load_fire_model()
+#     if loaded:
+#         fire_model_enabled = True
+# except Exception:
+#     pass
 
 # --- NEW: recording loop used when recording is toggled ON ---
 def _recording_loop(filename, stop_flag_ref):
@@ -729,6 +749,9 @@ def api_toggle_camera_feed():
 			video_capture = None
 		stream_ready = False
 
+	# Update dashboard system status for camera
+	dashboard_state['system_status']['camera'] = 'Online' if camera_enabled else 'Offline'
+
 	message = 'Camera feed enabled' if camera_enabled else 'Camera feed disabled'
 	add_log_entry(f"UI: {message} (ready={stream_ready})")
 	return jsonify({'success': True, 'camera_enabled': camera_enabled, 'stream_ready': stream_ready, 'message': message})
@@ -738,7 +761,8 @@ def api_toggle_camera_feed():
 def api_camera_feed_status():
     if not session.get('user'):
         return jsonify({'error':'Authentication required'}), 401
-    return jsonify({'camera_enabled': camera_enabled})
+    # ensure we return the live camera_enabled-based status
+    return jsonify({'camera_enabled': camera_enabled, 'camera_status': dashboard_state['system_status'].get('camera','Offline')})
 
 # API to force-disable camera (used before navigating to History)
 @app.route('/api/disable_camera', methods=['POST'])
@@ -755,6 +779,8 @@ def api_disable_camera():
                 except:
                     pass
                 video_capture = None
+            # reflect status in UI
+            dashboard_state['system_status']['camera'] = 'Offline'
             add_log_entry('UI: Camera disabled (navigation to history)')
             return jsonify({'success': True, 'camera_enabled': camera_enabled})
         except Exception as e:
@@ -768,563 +794,31 @@ HTML_TEMPLATE = """
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PyroSense Dashboard - Python Edition</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    
-    body {
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      background-image: url('/static/login background.jpg');
-      background-size: cover;
-      background-position: center;
-      background-repeat: no-repeat;
-      background-attachment: fixed;
-      color: #333;
-      min-height: 100vh;
-    }
-    
-    .dashboard-overlay {
-      background: rgba(255, 255, 255, 0.95);
-      backdrop-filter: blur(10px);
-      min-height: 100vh;
-    }
-    
-    .dashboard-title {
-      padding: 12px 20px;
-      background: linear-gradient(135deg, #4a5568 0%, #2d3748 100%);
-      color: #fff;
-      font-size: 14px;
-      font-weight: 600;
-      letter-spacing: 1px;
-      text-align: center;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    
-    header {
-      background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 50%, #ffeb3b 100%);
-      color: white;
-      padding: 20px;
-      box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-      position: relative;
-    }
-    
-    .header-container {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      max-width: 1200px;
-      margin: 0 auto;
-    }
-    
-    .header-left {
-      display: flex;
-      align-items: center;
-      gap: 20px;
-    }
-    
-    .header-logo {
-      width: 50px;
-      height: 50px;
-      background: rgba(255, 255, 255, 0.2);
-      backdrop-filter: blur(10px);
-      border-radius: 15px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 2rem;
-      box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-      border: 2px solid rgba(255, 255, 255, 0.3);
-    }
-    
-    .header-title-section {
-      text-align: left;
-    }
-    
-    .header-title {
-      margin: 0;
-      font-size: 2rem;
-      font-weight: 700;
-      letter-spacing: -1px;
-      color: white;
-      text-shadow: 0 2px 4px rgba(0,0,0,0.3);
-    }
-    
-    .header-subtitle {
-      margin: 0;
-      font-size: 0.9rem;
-      opacity: 0.9;
-      font-weight: 300;
-    }
-    
-    .header-right {
-      display: flex;
-      align-items: center;
-      gap: 15px;
-    }
-    
-    .badge {
-      padding: 8px 16px;
-      border-radius: 25px;
-      font-size: 0.8rem;
-      display: inline-block;
-      font-weight: 600;
-      backdrop-filter: blur(10px);
-      border: 1px solid rgba(255, 255, 255, 0.3);
-    }
-    
-    .python-badge {
-      background: rgba(255,255,255,0.2);
-      color: white;
-    }
-    
-    .system-badge {
-      background: rgba(76, 175, 80, 0.3);
-      color: white;
-    }
-    
-    .history-button, .logout-button {
-      padding: 8px 20px;
-      border-radius: 25px;
-      font-size: 0.85rem;
-      text-decoration: none;
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      transition: all 0.3s ease;
-      backdrop-filter: blur(10px);
-      border: 1px solid rgba(255, 255, 255, 0.3);
-      font-weight: 600;
-    }
-    
-    .history-button {
-      background: rgba(255,255,255,0.2);
-      color: white;
-    }
-    
-    .logout-button {
-      background: rgba(214, 40, 40, 0.3);
-      color: white;
-    }
-    
-    .history-button:hover, .logout-button:hover {
-      background: rgba(255,255,255,0.3);
-      transform: translateY(-2px);
-      box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-    }
-    
-    main {
-      max-width: 1200px;
-      margin: 0 auto;
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 25px;
-      padding: 30px 20px;
-    }
-    
-    .card {
-      background: rgba(255, 255, 255, 0.95);
-      backdrop-filter: blur(15px);
-      border-radius: 20px;
-      overflow: hidden;
-      box-shadow: 0 8px 25px rgba(0,0,0,0.15);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      transition: transform 0.3s ease, box-shadow 0.3s ease;
-    }
-    
-    .card:hover {
-      transform: translateY(-5px);
-      box-shadow: 0 15px 35px rgba(0,0,0,0.2);
-    }
-    
-    .card-header {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 20px;
-      background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-      border-bottom: 1px solid rgba(0,0,0,0.1);
-    }
-    
-    .card-icon {
-      width: 28px;
-      height: 28px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      opacity: 0.8;
-      font-size: 1.2rem;
-    }
-    
-    .card-title {
-      margin: 0;
-      font-size: 1.2rem;
-      font-weight: 700;
-      color: #2d3748;
-    }
-    
-    .card-content {
-      padding: 25px;
-      text-align: center;
-    }
-    
-    .video-player {
-      position: relative;
-      width: 100%;
-      padding-top: 56.25%; /* 16:9 aspect ratio */
-      background: #222;
-      border-radius: 12px;
-      overflow: hidden;
-      box-shadow: 0 8px 30px rgba(0,0,0,0.25);
-    }
-    .video-player.minimized {
-      padding-top: 28%; /* smaller when minimized */
-      width: 320px;
-      height: auto;
-    }
-    .video-player img.stream {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-      background: #000;
-    }
-    .video-controls {
-      position: absolute;
-      right: 12px;
-      bottom: 12px;
-      display: flex;
-      gap: 8px;
-      z-index: 20;
-    }
-    .video-control-btn {
-      background: rgba(0,0,0,0.6);
-      color: #fff;
-      border: 1px solid rgba(255,255,255,0.08);
-      padding: 8px 12px;
-      border-radius: 24px;
-      cursor: pointer;
-      font-weight: 700;
-      backdrop-filter: blur(6px);
-    }
-    .video-control-btn.active {
-      box-shadow: 0 6px 18px rgba(255,0,0,0.25);
-      background: linear-gradient(90deg,#ff6b6b,#ff8a00);
-    }
-    .video-topbar {
-      position: absolute;
-      left: 12px;
-      top: 12px;
-      z-index: 20;
-      display:flex;
-      gap:8px;
-      align-items:center;
-    }
-    .video-badge {
-      background: rgba(0,0,0,0.5);
-      color: #fff;
-      padding: 6px 10px;
-      border-radius: 999px;
-      font-weight: 700;
-      font-size: 0.85rem;
-      display:inline-flex;
-      align-items:center;
-      gap:6px;
-    }
-    
-    .status-line {
-      display: flex;
-      justify-content: center;
-      margin-bottom: 20px;
-      font-size: 1rem;
-      align-items: center;
-      gap: 8px;
-    }
-    
-    .status-label {
-      font-weight: 600;
-      color: #4a5568;
-    }
-    
-    .button-group {
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-      justify-content: center;
-    }
-    
-    .action-button {
-      background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 50%, #ffeb3b 100%);
-      color: white;
-      border: none;
-      padding: 10px 18px;
-      border-radius: 25px;
-      font-size: 0.85rem;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      transition: all 0.3s ease;
-      font-weight: 600;
-      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
-      box-shadow: 0 4px 15px rgba(255, 107, 107, 0.3);
-      /* ensure anchors with this class don't show underline */
-      text-decoration: none;
-    }
-    /* also cover anchor pseudo-states to be safe */
-    .action-button:link, .action-button:visited, .action-button:hover, .action-button:active {
-      text-decoration: none;
-    }
-    .action-button.red {
-      background: linear-gradient(135deg, #d62828 0%, #f77f00 100%);
-      box-shadow: 0 4px 15px rgba(214, 40, 40, 0.3);
-    }
-    
-    .action-button.red:hover {
-      background: linear-gradient(135deg, #c52222 0%, #e67300 100%);
-      box-shadow: 0 8px 25px rgba(214, 40, 40, 0.4);
-    }
-    
-    .action-button.green {
-      background: linear-gradient(135deg, #4CAF50 0%, #66bb6a 100%);
-      box-shadow: 0 4px 15px rgba(76, 175, 80, 0.3);
-    }
-    
-    .action-button.green:hover {
-      background: linear-gradient(135deg, #43a047 0%, #5cb85c 100%);
-      box-shadow: 0 8px 25px rgba(76, 175, 80, 0.4);
-    }
-    
-    .temperature-display {
-      font-size: 3rem;
-      font-weight: 700;
-      background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-      text-align: center;
-      margin: 15px 0;
-      text-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    
-    .slider-container {
-      padding: 0 15px;
-      margin: 20px 0;
-    }
-    
-    .slider {
-      -webkit-appearance: none;
-      width: 100%;
-      height: 10px;
-      background: linear-gradient(to right, #4CAF50, #ffeb3b, #ff6b6b);
-      border-radius: 8px;
-      cursor: pointer;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-    }
-    
-    .slider::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 24px;
-      height: 24px;
-      background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 100%);
-      border-radius: 50%;
-      border: 3px solid white;
-      cursor: pointer;
-      box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-      transition: all 0.3s ease;
-    }
-    
-    .slider::-webkit-slider-thumb:hover {
-      transform: scale(1.1);
-      box-shadow: 0 6px 20px rgba(0,0,0,0.3);
-    }
-    
-    .threshold-info {
-      font-size: 1rem;
-      margin-bottom: 20px;
-      text-align: center;
-      font-weight: 600;
-      color: #4a5568;
-    }
-    
-    .log-container {
-      border: 1px solid rgba(0,0,0,0.1);
-      border-radius: 15px;
-      height: 180px;
-      overflow-y: auto;
-      font-family: 'Consolas', 'Monaco', monospace;
-      font-size: 0.85rem;
-      background: rgba(248, 249, 250, 0.8);
-      margin-bottom: 20px;
-      backdrop-filter: blur(10px);
-    }
-    
-    .log-entry {
-      padding: 8px 15px;
-      border-bottom: 1px solid rgba(0,0,0,0.05);
-      line-height: 1.4;
-      transition: background-color 0.2s ease;
-    }
-    
-    .log-entry:hover {
-      background-color: rgba(255, 255, 255, 0.5);
-    }
-    
-    .log-entry:last-child {
-      border-bottom: none;
-    }
-    
-    .alert-panel {
-      background: linear-gradient(135deg, #ff6b6b, #ffa500);
-      color: white;
-      padding: 20px;
-      border-radius: 15px;
-      text-align: center;
-      font-weight: 700;
-      margin-bottom: 20px;
-      display: none;
-      font-size: 1.2rem;
-      box-shadow: 0 8px 25px rgba(255,107,107,0.4);
-      text-shadow: 0 2px 4px rgba(0,0,0,0.3);
-      animation: pulse 2s infinite;
-    }
-    
-    @keyframes pulse {
-      0% { transform: scale(1); }
-      50% { transform: scale(1.02); }
-      100% { transform: scale(1); }
-    }
-    
-    .alert-panel.active {
-      display: block;
-    }
-    
-    .device-status-list {
-      list-style: none;
-      padding: 0;
-      margin: 0 0 20px 0;
-    }
-    
-    .device-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 15px;
-      padding: 12px 15px;
-      border-radius: 12px;
-      transition: all 0.3s ease;
-      background: rgba(248, 249, 250, 0.8);
-      backdrop-filter: blur(10px);
-    }
-    
-    .device-row:hover {
-      background: rgba(255, 255, 255, 0.9);
-      transform: translateX(5px);
-      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-    }
-    
-    .device-name {
-      display: flex;
-      align-items: center;
-      font-weight: 600;
-      color: #2d3748;
-    }
-    
     .status-indicator {
+      display: inline-block;
       width: 12px;
       height: 12px;
       border-radius: 50%;
-      display: inline-block;
-      margin-right: 12px;
-      box-shadow: 0 2px 8px rgba(76, 175, 80, 0.3);
+      margin-right: 8px;
     }
-    
     .status-indicator.green {
-      background: linear-gradient(135deg, #4CAF50 0%, #66bb6a 100%);
+      background-color: #28a745;
     }
-    
-    .status-value {
-      font-weight: 600;
-      padding: 4px 12px;
-      border-radius: 20px;
-      font-size: 0.85rem;
+    .status-indicator.red {
+      background-color: #dc3545;
     }
-    
-    .status-value.ok, .status-value.running, .status-value.connected {
-      background: linear-gradient(135deg, rgba(76, 175, 80, 0.2) 0%, rgba(102, 187, 106, 0.2) 100%);
-      color: #2e7d32;
-    }
-    
-    footer {
-      text-align: center;
-      padding: 20px;
-      font-size: 0.85rem;
-      color: #6c757d;
-      background: rgba(255, 255, 255, 0.8);
-      backdrop-filter: blur(10px);
-      margin-top: 20px;
-      font-weight: 500;
-    }
-    
-    .attribution {
-      position: fixed;
-      bottom: 20px;
-      right: 20px;
-      font-size: 12px;
-      color: rgba(0, 0, 0, 0.6);
-      background: rgba(255, 255, 255, 0.9);
-      padding: 8px 12px;
-      border-radius: 20px;
-      backdrop-filter: blur(10px);
-    }
-    
-    .attribution a {
-      color: rgba(0, 0, 0, 0.7);
-      text-decoration: none;
-    }
-    
-    .attribution a:hover {
-      text-decoration: underline;
-    }
-    
-    /* Better spacing between elements */
-    .card-content > *:not(:last-child) {
-      margin-bottom: 15px;
-    }
-    
-    /* Responsive design improvements */
-    @media (max-width: 768px) {
-      main {
-        grid-template-columns: 1fr;
-        padding: 20px 15px;
-        gap: 20px;
-      }
-      
-      .header-container {
-        flex-direction: column;
-        gap: 15px;
-        text-align: center;
-      }
-      
-      .header-right {
-        flex-wrap: wrap;
-        justify-content: center;
-      }
-      
-      .card[style*="grid-column: span 2"] {
-        grid-column: span 1;
-      }
+    .status-indicator.blue {
+      background-color: #007bff;
     }
   </style>
 </head>
 <body>
   <div class="dashboard-overlay">
-    <div class="dashboard-title">DASHBOARD</div>
+    <!-- REMOVED: small top title bar -->
+    <!-- <div class="dashboard-title">DASHBOARD</div> -->
+
     <header>
       <div class="header-container">
         <div class="header-left">
@@ -1334,15 +828,25 @@ HTML_TEMPLATE = """
             <p class="header-subtitle">Advanced Fire Detection System - Python Edition</p>
           </div>
         </div>
+
+        <div class="header-center">
+          <nav class="main-nav">
+            <a href="/" class="nav-link active" id="navDashboard">Dashboard</a>
+            <span class="nav-sep" aria-hidden="true"></span>
+            <a href="http://localhost:5001/history" class="nav-link" id="navHistory">History</a>
+          </nav>
+        </div>
+
         <div class="header-right">
           <span class="badge python-badge">Made with Python Flask</span>
           <span class="badge system-badge">System Online</span>
-          <a href="http://localhost:5001/history" class="history-button">📊 HISTORY</a>
+          <!-- REMOVED: history button from right side -->
+          <!-- <a href="http://localhost:5001/history" class="history-button">📊 HISTORY</a> -->
           <a href="#" id="logoutBtn" class="logout-button">🚪 LOGOUT</a>
         </div>
       </div>
     </header>
-    
+
     <main>
       <!-- Live Camera Feed -->
       <div class="card">
@@ -1475,37 +979,37 @@ HTML_TEMPLATE = """
       <div class="card" style="grid-column: span 2;">
         <div class="card-header">
           <div class="card-icon">💻</div>
-          <h2 class="card-title">Device Status</h2>
+          <h2 class="card-title">System Status</h2>
         </div>
         <div class="card-content">
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
             <div class="device-row">
               <div class="device-name">
-                <span class="status-indicator green"></span>
+                <span class="status-indicator {{ camera_indicator }}"></span>
                 <span>RGB Camera:</span>
               </div>
-              <span class="status-value" id="cameraStatus">{{ system_status.camera }}</span>
+              <span class="status-value {{ camera_value_class }}" id="cameraStatus">{{ system_status.camera }}</span>
             </div>
             <div class="device-row">
               <div class="device-name">
-                <span class="status-indicator green"></span>
+                <span class="status-indicator {{ thermal_indicator }}"></span>
                 <span>Thermal Sensor:</span>
               </div>
-              <span class="status-value ok" id="thermalStatus">{{ system_status.thermal }}</span>
+              <span class="status-value {{ thermal_value_class }}" id="thermalStatus">{{ system_status.thermal }}</span>
             </div>
             <div class="device-row">
               <div class="device-name">
-                <span class="status-indicator green"></span>
+                <span class="status-indicator {{ edge_indicator }}"></span>
                 <span>Edge System:</span>
               </div>
-              <span class="status-value running" id="edgeStatus">{{ system_status.edge }}</span>
+              <span class="status-value {{ edge_value_class }}" id="edgeStatus">{{ system_status.edge }}</span>
             </div>
             <div class="device-row">
               <div class="device-name">
-                <span class="status-indicator green"></span>
+                <span class="status-indicator {{ internet_indicator }}"></span>
                 <span>Internet:</span>
               </div>
-              <span class="status-value connected" id="internetStatus">{{ system_status.internet }}</span>
+              <span class="status-value {{ internet_value_class }}" id="internetStatus">{{ system_status.internet }}</span>
             </div>
           </div>
           <div class="button-group" style="margin-top: 15px;">
@@ -1520,156 +1024,7 @@ HTML_TEMPLATE = """
     <footer>
       PyroSense 2025 © All rights reserved - Python Flask Edition
     </footer>
-
-  <script src="https://unpkg.com/sweetalert/dist/sweetalert.min.js"></script>
-  <script>
-    // Display any flashed messages using SweetAlert
-    document.addEventListener('DOMContentLoaded', function(){
-      {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-          {% for category, msg in messages %}
-            // show the sweetalert (category/msg are rendered JSON-safe)
-            (function(c,m){
-              var icon = 'info';
-              if (c == 'success') icon = 'success';
-              else if (c == 'warning') icon = 'warning';
-              else if (c == 'error') icon = 'error';
-              else if (c == 'info') icon = 'info';
-              swal({title: m, icon: icon, button: "OK"});
-            })({{ category|tojson }}, {{ msg|tojson }});
-          {% endfor %}
-        {% endif %}
-      {% endwith %}
-
-      // Confirmation handlers for sensitive actions
-      // Clear log
-      var clearBtn = document.getElementById('clearLogBtn');
-      if (clearBtn){
-        clearBtn.addEventListener('click', function(e){
-          e.preventDefault();
-          swal({
-            title: "Clear log?",
-            text: "This will clear the local detection log. Continue?",
-            icon: "warning",
-            buttons: ["Cancel","Yes, clear"],
-            dangerMode: true
-          }).then((willClear) => {
-            if (willClear) {
-              document.getElementById('clearLogForm').submit();
-            }
-          });
-        });
-      }
-
-      // Ensure camera is turned OFF before navigating to History (prevents camera staying active)
-      var historyBtn = document.querySelector('.history-button');
-      if (historyBtn){
-        historyBtn.addEventListener('click', function(e){
-          e.preventDefault();
-          var href = historyBtn.href;
-          // best-effort disable on server, then navigate
-          fetch('/api/disable_camera', {method: 'POST', credentials: 'same-origin'})
-            .catch(function(){ /* ignore errors but still navigate */ })
-            .finally(function(){
-              window.location = href;
-            });
-        });
-      }
-
-      // Export log
-      var exportBtn = document.getElementById('exportLogBtn');
-      if (exportBtn){
-        exportBtn.addEventListener('click', function(e){
-          e.preventDefault();
-          swal({
-            title: "Export log?",
-            text: "A plaintext (.txt) file will be downloaded.",
-            icon: "info",
-            buttons: ["Cancel","Export"]
-          }).then((doExport) => {
-            if (doExport) {
-              // direct download via navigation to export URL
-              window.location = "/api/export_log";
-            }
-          });
-        });
-      }
-
-      // Logout confirmation
-      var logoutBtn = document.getElementById('logoutBtn');
-      if (logoutBtn){
-        logoutBtn.addEventListener('click', function(e){
-          e.preventDefault();
-          swal({
-            title: "Log out?",
-            text: "Are you sure you want to log out?",
-            icon: "warning",
-            buttons: ["Cancel", "Yes, log out"],
-            dangerMode: true
-          }).then((willLogout) => {
-            if (willLogout) {
-              window.location = "/logout_confirm";
-            }
-          });
-        });
-      }
-    });
-  </script>
-  <script>
-    // Fullscreen helper for the live camera container
-    // Toggles fullscreen on the #videoPlayer element and updates the button label/state.
-    function toggleFullscreen() {
-      try {
-        const container = document.getElementById('videoPlayer');
-        const btn = document.getElementById('fullscreenBtn');
-        if (!container) return;
-
-        const isInFs = !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
-        if (!isInFs) {
-          if (container.requestFullscreen) container.requestFullscreen();
-          else if (container.webkitRequestFullscreen) container.webkitRequestFullscreen();
-          else if (container.msRequestFullscreen) container.msRequestFullscreen();
-        } else {
-          if (document.exitFullscreen) document.exitFullscreen();
-          else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-          else if (document.msExitFullscreen) document.msExitFullscreen();
-        }
-        // Button text will be updated by the fullscreenchange handler below.
-      } catch (err) {
-        console.error('toggleFullscreen error', err);
-      }
-    }
-
-    // Update fullscreen button label/state when fullscreen changes
-    function _updateFullscreenButton() {
-      const btn = document.getElementById('fullscreenBtn');
-      if (!btn) return;
-      const inFs = !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
-      btn.classList.toggle('active', inFs);
-      btn.textContent = inFs ? 'Exit Fullscreen' : 'Fullscreen';
-    }
-
-    // Listen for vendor-neutral and vendor-prefixed fullscreen change events
-    document.addEventListener('fullscreenchange', _updateFullscreenButton);
-    document.addEventListener('webkitfullscreenchange', _updateFullscreenButton);
-    document.addEventListener('msfullscreenchange', _updateFullscreenButton);
-
-    // Support pressing "F" to toggle fullscreen as a convenience
-    document.addEventListener('keydown', function(e) {
-      // ignore when focus is in an input/textarea to avoid interfering with typing
-      const tag = (document.activeElement && document.activeElement.tagName) || '';
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if (e.key === 'f' || e.key === 'F') {
-        e.preventDefault();
-        toggleFullscreen();
-      }
-    });
-
-    // Ensure button is initialized correctly on page load
-    document.addEventListener('DOMContentLoaded', function(){
-      _updateFullscreenButton();
-    });
-  </script>
+  </div>
 </body>
 </html>
 """
@@ -1940,6 +1295,35 @@ def dashboard():
         # If no user in session, redirect to login page
         return redirect('http://localhost:5000/login')
     
+    # Force thermal sensor status to "Offline" for now
+    dashboard_state['system_status']['thermal'] = 'Offline'
+
+    # Compute indicator CSS classes based on current system_status values
+    def _indicator(status):
+        s = (status or '').lower()
+        if any(x in s for x in ['online', 'ok', 'connected']):
+            return 'green'
+        if any(x in s for x in ['running']):
+            return 'blue'
+        return 'red'
+
+    def _value_class(status):
+        s = (status or '').lower()
+        if 'offline' in s or 'unavailable' in s:
+            return 'offline'
+        if 'connected' in s:
+            return 'connected'
+        if 'online' in s or 'ok' in s:
+            return 'ok'
+        if 'running' in s:
+            return 'running'
+        return ''
+
+    camera_stat = dashboard_state['system_status'].get('camera', 'Offline')
+    thermal_stat = dashboard_state['system_status'].get('thermal', 'Offline')
+    edge_stat = dashboard_state['system_status'].get('edge', 'Running')
+    internet_stat = dashboard_state['system_status'].get('internet', 'Disconnected')
+
     template_data = {
         'current_temperature': round(dashboard_state['current_temperature'], 1),
         'threshold': dashboard_state['threshold'],
@@ -1951,7 +1335,17 @@ def dashboard():
         'system_status': dashboard_state['system_status'],
         'log_entries': dashboard_state['log_entries'][:10],  # Show only recent 10
         'last_update': datetime.now().strftime('%m/%d/%Y %H:%M:%S'),
-        'username': session.get('name', 'User')  # Add username from session
+        'username': session.get('name', 'User'),  # Add username from session
+        # indicator classes sent to template
+        'camera_indicator': _indicator(camera_stat),
+        'thermal_indicator': _indicator(thermal_stat),
+        'edge_indicator': _indicator(edge_stat),
+        'internet_indicator': _indicator(internet_stat),
+        # value pill classes for consistent styling (used in template)
+        'camera_value_class': _value_class(camera_stat),
+        'thermal_value_class': _value_class(thermal_stat),
+        'edge_value_class': _value_class(edge_stat),
+        'internet_value_class': _value_class(internet_stat),
     }
     return render_template_string(HTML_TEMPLATE, **template_data)
 
@@ -1978,13 +1372,14 @@ def get_status():
 def toggle_recording():
     """Toggle recording state"""
     dashboard_state['is_recording'] = not dashboard_state['is_recording']
+    # reflect on edge system status
+    dashboard_state['system_status']['edge'] = 'Recording' if dashboard_state['is_recording'] else 'Running'
     message = 'Python recording started' if dashboard_state['is_recording'] else 'Python recording stopped'
     add_log_entry(message)
     
     return jsonify({
         'success': True,
         'is_recording': dashboard_state['is_recording'],
-
         'message': message
     })
 
@@ -2079,7 +1474,7 @@ def action_toggle_camera():
                     try:
                         ret, _ = video_capture.read()
                         if ret:
-                            stream_ready = True
+                            stream_ready = True   # <-- fixed (was `true`)
                     except:
                         stream_ready = bool(video_capture.isOpened())
             except Exception:
@@ -2093,6 +1488,9 @@ def action_toggle_camera():
                 pass
             video_capture = None
         stream_ready = False
+
+    # Update UI status
+    dashboard_state['system_status']['camera'] = 'Online' if camera_enabled else 'Offline'
 
     message = 'Camera feed enabled' if camera_enabled else 'Camera feed disabled'
     add_log_entry(f"UI: {message} (ready={stream_ready})")
@@ -2114,6 +1512,9 @@ def action_toggle_recording():
         fname = os.path.join(recordings_dir, f"recording_{ts}.mp4")
         recording_flag = True
 
+        # Update edge status
+        dashboard_state['system_status']['edge'] = 'Recording'
+
         # stop flag accessor
         stop_ref = lambda: not recording_flag
 
@@ -2127,6 +1528,8 @@ def action_toggle_recording():
     else:
         # stop recording
         recording_flag = False
+        # update edge status
+        dashboard_state['system_status']['edge'] = 'Running'
         # let thread finish; do not block long
         add_log_entry('UI: Recording stopped by user')
         flash('Recording stopped', 'success')
@@ -2243,6 +1646,31 @@ def action_restart_system():
     message = 'Python system restart initiated...'
     add_log_entry(message)
     flash('System restart initiated', 'info')
+
+    # set UI state
+    dashboard_state['system_status']['edge'] = 'Restarting'
+
+    # spawn background thread to perform restart after a short delay
+    def _do_restart():
+        try:
+            time.sleep(1.0)
+            add_log_entry("System: performing process restart via execv")
+            # re-exec the current Python interpreter with same args
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception as e:
+            add_log_entry(f"System restart failed: {e}")
+            # if execv fails, attempt to exit so an external supervisor can restart
+            try:
+                os._exit(0)
+            except:
+                pass
+
+    try:
+        t = threading.Thread(target=_do_restart, daemon=True)
+        t.start()
+    except Exception as e:
+        add_log_entry(f"Restart scheduling failed: {e}")
+
     return redirect(url_for('index'))
 
 @app.route('/logout_confirm')
@@ -2329,6 +1757,22 @@ def action_clear_log():
     add_log_entry('User cleared the log')
     flash('Log cleared', 'success')
     return redirect(url_for('index'))
+
+# --- NEW: Internet connectivity monitor to update system status periodically ---
+def internet_monitor():
+    while True:
+        try:
+            # quick lightweight check to public DNS
+            sock = socket.create_connection(("8.8.8.8", 53), timeout=1.0)
+            sock.close()
+            dashboard_state['system_status']['internet'] = 'Connected'
+        except Exception:
+            dashboard_state['system_status']['internet'] = 'Disconnected'
+        time.sleep(10)
+
+# Start internet monitor thread
+internet_thread = threading.Thread(target=internet_monitor, daemon=True)
+internet_thread.start()
 
 if __name__ == '__main__':
     print("🐍 Starting PyroSense Python Flask Dashboard...")
