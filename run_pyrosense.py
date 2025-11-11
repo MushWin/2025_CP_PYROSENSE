@@ -56,6 +56,8 @@ def main():
     time.sleep(1.5)  # small head start for login
     procs.append(spawn("history.py"))
     procs.append(spawn("dashboard.py"))
+    # start admin panel
+    procs.append(spawn("admin.py"))
 
     print("Opening login page in your browser…")
     webbrowser.open("http://localhost:5000")
@@ -65,6 +67,7 @@ def main():
     print("Login Server:    http://localhost:5000")
     print("History Server:  http://localhost:5001")
     print("Dashboard:       http://localhost:5002")
+    print("Admin Panel:     http://localhost:5003")
     print("\nPress Ctrl+C once in this window to stop all servers.")
     print("=" * 60)
 

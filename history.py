@@ -140,7 +140,7 @@ HTML_TEMPLATE = """
           <span>Select Date Range</span>
         </div>
         <div class="date-range-inputs">
-          <div class="date-input-group">
+          <div class="date-input-group">               v
             <label class="date-input-label">Start Date</label>
             <input type="text" class="date-input" id="startDate" placeholder="📅 Start Date" readonly>
           </div>
