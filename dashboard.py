@@ -15,16 +15,12 @@ import numpy as np  # ADDED: NumPy for image processing
 import os  # ADDED: missing os import used by model file helpers
 import glob
 import pathlib
-import sys            # <-- NEW
-import socket         # <-- NEW
+import urllib.request
+import urllib.error
 
 app = Flask(__name__)
 # Add the same secret key as login.py for shared sessions
 app.secret_key = 'pyrosense_shared_secret_key'
-
-# Configuration: Login service base URL and camera control endpoint
-LOGIN_BASE = os.environ.get('PYROSENSE_LOGIN_BASE', 'http://127.0.0.1:5000')
-CAMERA_CONTROL_URL = os.environ.get('CAMERA_CONTROL_URL', '')
 
 # Global variables for dashboard state
 dashboard_state = {
@@ -37,7 +33,7 @@ dashboard_state = {
     'fire_status': 'No fire detected',
     'system_status': {
         'camera': 'Online',
-        'thermal': 'Offline',   # always Offline unless you implement it
+        'thermal': 'OK', 
         'edge': 'Running',
         'internet': 'Connected'
     },
@@ -45,9 +41,7 @@ dashboard_state = {
         f"[{datetime.now().strftime('%m/%d/%Y %H:%M:%S')}] System initialized",
         f"[{datetime.now().strftime('%m/%d/%Y %H:%M:%S')}] Sensors online",
         f"[{datetime.now().strftime('%m/%d/%Y %H:%M:%S')}] No fire detected"
-    ],
-    # calibration baseline so "calibrate" takes effect
-    'baseline_temp': 34.6
+    ]
 }
 
 # Add global video and fire-model flags
@@ -76,13 +70,6 @@ last_detection_summary = {
 detection_lock = threading.Lock()
 # Minimum seconds between logging identical detection summaries
 _detection_log_min_interval = 5.0
-
-# --- NEW: synthetic thermal influence from RGB fire detections ---
-last_fire_detection_time = 0.0            # epoch of last 'fire' label seen
-fire_temp_increase = 15.0                 # degrees above threshold to push when fire seen
-fire_temp_persist_seconds = 8.0           # how long the elevated temp is held/ramped
-fire_temp_rise_rate = 1.5                 # deg per tick rise while ramping
-fire_temp_decay_rate = 0.8                # deg per tick decay after persist window
 
 # --- NEW: persistence folders and recording state ---
 recordings_dir = os.path.join(os.getcwd(), "recordings")
@@ -521,9 +508,7 @@ def generate_mjpeg():
 	last_confidences = []
 	last_labels = []
 	last_colors = []
-	# ensure we can update the global fire timestamp here
-	global last_fire_detection_time
-
+	
 	while True:
 		cap = get_video_capture()
 		# If camera disabled or not available, yield placeholder but keep re-checking
@@ -671,45 +656,26 @@ def generate_mjpeg():
 				try:
 					now = time.time()
 					with detection_lock:
-						# snapshot previous summary for comparison / rate-limit check
-						prev_labels = list(last_detection_summary.get('labels', []))
-						prev_timestamp = float(last_detection_summary.get('timestamp', 0) or 0)
-
-						new_labels = [lbl for lbl in last_boxes]  # labels observed by this inference
-
-						# expose a human-friendly short summary for acknowledgement UI
+						new_labels = [lbl for lbl in last_labels]  # list of strings from this inference
+						# always update last_detection_summary so UI badge shows latest objects
+						last_detection_summary['labels'] = new_labels
+						last_detection_summary['timestamp'] = now
+						# also expose a human-friendly short summary for acknowledgement UI
 						if new_labels:
 							dashboard_state['last_detected'] = ', '.join(new_labels[:4])
 						else:
 							dashboard_state['last_detected'] = ''
-
-						# ALWAYS update fire timestamp when any 'fire' label is present
-						if any('fire' in l.lower() for l in new_labels):
-							# update global timestamp so simulate_temperature_variation sees it
-							last_fire_detection_time = now
-							# immediate temperature nudge so UI reacts quickly; further ramping handled by background simulator
-							try:
-								curr = float(dashboard_state.get('current_temperature', 34.6) or 34.6)
-								target_now = dashboard_state['threshold'] + fire_temp_increase
-								dashboard_state['current_temperature'] = max(curr, min(target_now, curr + random.uniform(3.0, 8.0)))
-							except Exception:
-								pass
-
-						# Rate-limited logging when label set actually changed (compare to previous snapshot)
-						prev_set = set(prev_labels)
+						
+						# Rate-limited logging when label set actually changed
+						prev_set = set(last_detection_summary.get('labels', []))
 						new_set = set(new_labels)
-						if new_set and new_set != prev_set and (now - prev_timestamp > _detection_log_min_interval):
+						if new_set and new_set != prev_set and (now - last_detection_summary.get('timestamp', 0) > _detection_log_min_interval):
 							for i, lbl in enumerate(new_labels):
 								conf = last_confidences[i] if i < len(last_confidences) else 0.0
 								add_log_entry(f"Camera detection: {lbl} (conf={conf:.2f})")
-							# keep the UI alert/logging behavior
 							if any('fire' in l.lower() for l in new_labels):
 								dashboard_state['fire_status'] = 'FIRE DETECTED!'
 								add_log_entry('🚨 FIRE ALERT: Camera detected fire!')
-
-						# Now update the shared detection summary (after checks/logging)
-						last_detection_summary['labels'] = new_labels
-						last_detection_summary['timestamp'] = now
 				except Exception:
 					# don't break the stream on logging/errors
 					pass
@@ -819,8 +785,6 @@ def api_toggle_camera_feed():
 						ret, _ = video_capture.read()
 						if ret:
 							stream_ready = True
-						else:
-							stream_ready = bool(video_capture.isOpened())
 					except:
 						stream_ready = bool(video_capture.isOpened())
 				else:
@@ -832,13 +796,10 @@ def api_toggle_camera_feed():
 		with video_lock:
 			try:
 				if video_capture is not None:
-					try:
-						video_capture.release()
-					except:
-						pass
-				video_capture = None
+					video_capture.release()
 			except:
 				pass
+			video_capture = None
 		stream_ready = False
 
 	message = 'Camera feed enabled' if camera_enabled else 'Camera feed disabled'
@@ -850,8 +811,7 @@ def api_toggle_camera_feed():
 def api_camera_feed_status():
     if not session.get('user'):
         return jsonify({'error':'Authentication required'}), 401
-    # ensure we return the live camera_enabled-based status
-    return jsonify({'camera_enabled': camera_enabled, 'camera_status': dashboard_state['system_status'].get('camera','Offline')})
+    return jsonify({'camera_enabled': camera_enabled})
 
 # API to force-disable camera (used before navigating to History)
 @app.route('/api/disable_camera', methods=['POST'])
@@ -868,141 +828,11 @@ def api_disable_camera():
                 except:
                     pass
                 video_capture = None
-            # reflect status in UI
-            dashboard_state['system_status']['camera'] = 'Offline'
             add_log_entry('UI: Camera disabled (navigation to history)')
             return jsonify({'success': True, 'camera_enabled': camera_enabled})
         except Exception as e:
-            add_log_entry(f'Recording start error: {e}')
-            recording_flag = False
-            dashboard_state['is_recording'] = False
-            flash('Failed to start recording', 'error')
-    else:
-        # stop: the recording thread checks recording_flag via stop lambda and will exit
-        add_log_entry('User stopped recording')
-        flash('Recording stopped', 'success')
-
-    return redirect(url_for('index'))
-
-# --- NEW: form-action to take a snapshot via POST (used by dashboard form) ---
-@app.route('/action/snapshot', methods=['POST'])
-def action_snapshot():
-    if not session.get('user'):
-        flash('Authentication required', 'error')
-        return redirect(url_for('index'))
-
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    fname = os.path.join(snapshots_dir, f"snapshot_{ts}.jpg")
-    cap = None
-    try:
-        cap = get_video_capture()
-        if cap is None or not getattr(cap, "isOpened", lambda: False)():
-            # try a short-lived capture
-            cap = open_capture_with_backends(0, warmup_reads=2)
-        if cap is None or not getattr(cap, "isOpened", lambda: False)():
-            add_log_entry('Snapshot failed: camera unavailable')
-            flash('Snapshot failed: camera unavailable', 'error')
-            return redirect(url_for('index'))
-
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            add_log_entry('Snapshot failed: no frame')
-            flash('Snapshot failed: no frame', 'error')
-            return redirect(url_for('index'))
-
-        # mirror to match stream
-        frame = cv2.flip(frame, 1)
-        cv2.imwrite(fname, frame)
-        add_log_entry(f'User snapshot saved: {os.path.basename(fname)}')
-        flash(f'Snapshot saved: {os.path.basename(fname)}', 'success')
-    except Exception as e:
-        add_log_entry(f'Snapshot error: {e}')
-        flash('Snapshot error', 'error')
-    finally:
-        # do NOT release global capture here; open_capture_with_backends returns a new temporary cap which we should release
-        try:
-            if cap is not None and cap is not get_video_capture():
-                try:
-                    cap.release()
-                except:
-                    pass
-        except Exception:
-            pass
-
-    return redirect(url_for('index'))
-
-# --- NEW: clear log (form) ---
-@app.route('/action/clear_log', methods=['POST'])
-def action_clear_log():
-    if not session.get('user'):
-        flash('Authentication required', 'error')
-        return redirect(url_for('index'))
-    dashboard_state['log_entries'] = []
-    add_log_entry('User cleared the log')
-    flash('Log cleared', 'success')
-    return redirect(url_for('index'))
-
-# --- NEW: export log (API returns downloadable text) ---
-@app.route('/api/export_log')
-def api_export_log():
-    if not session.get('user'):
-        return jsonify({'error': 'Authentication required'}), 401
-    try:
-        content = "\n".join(reversed(dashboard_state.get('log_entries', [])))  # oldest first
-        resp = make_response(content)
-        resp.headers['Content-Type'] = 'text/plain; charset=utf-8'
-        resp.headers['Content-Disposition'] = 'attachment; filename=pyrosense_log.txt'
-        return resp
-    except Exception as e:
-        add_log_entry(f'Export log error: {e}')
-        return jsonify({'error': 'Export failed'}), 500
-
-# --- NEW: simulate alert (form) ---
-@app.route('/action/simulate_alert', methods=['POST'])
-def action_simulate_alert():
-    if not session.get('user'):
-        flash('Authentication required', 'error')
-        return redirect(url_for('index'))
-    dashboard_state['manual_alert'] = 'TEST ALERT: Manual simulation'
-    dashboard_state['alerts_active'] = True
-    dashboard_state['fire_status'] = 'FIRE DETECTED!'
-    add_log_entry('User triggered test alert')
-    flash('Test alert triggered', 'success')
-    return redirect(url_for('index'))
-
-# --- NEW: acknowledge alert (form) ---
-@app.route('/action/acknowledge_alert', methods=['POST'])
-def action_acknowledge_alert():
-    if not session.get('user'):
-        flash('Authentication required', 'error')
-        return redirect(url_for('index'))
-    dashboard_state['manual_alert'] = None
-    dashboard_state['fire_status'] = 'No fire detected'
-    add_log_entry('User acknowledged alert')
-    flash('Alert acknowledged', 'notice')
-    return redirect(url_for('index'))
-
-# --- NEW: mute alerts for 5 minutes (form) ---
-@app.route('/action/mute_alerts', methods=['POST'])
-def action_mute_alerts():
-    if not session.get('user'):
-        flash('Authentication required', 'error')
-        return redirect(url_for('index'))
-    try:
-        dashboard_state['alerts_active'] = False
-        add_log_entry('User muted alerts for 5 minutes')
-        flash('Alerts muted for 5 minutes', 'success')
-        # schedule unmute after 5 minutes
-        def _unmute():
-            dashboard_state['alerts_active'] = True
-            add_log_entry('Alerts auto-unmuted after 5 minutes')
-        t = threading.Timer(300.0, _unmute)
-        t.daemon = True
-        t.start()
-    except Exception as e:
-        add_log_entry(f'Mute alerts error: {e}')
-        flash('Failed to mute alerts', 'error')
-    return redirect(url_for('index'))
+            add_log_entry(f'Camera disable error: {e}')
+            return jsonify({'success': False, 'error': str(e)}), 500
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -1012,24 +842,6 @@ HTML_TEMPLATE = """
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PyroSense Dashboard - Python Edition</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
-  <style>
-    .status-indicator {
-      display: inline-block;
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      margin-right: 8px;
-    }
-    .status-indicator.green {
-      background-color: #28a745;
-    }
-    .status-indicator.red {
-      background-color: #dc3545;
-    }
-    .status-indicator.blue {
-      background-color: #007bff;
-    }
-  </style>
 </head>
 <body>
   <div class="dashboard-overlay">
@@ -1153,25 +965,16 @@ HTML_TEMPLATE = """
 
           <div class="temperature-display" id="currentTemp">{{ current_temperature }}°C</div>
           <div class="threshold-info">Heat Threshold: <strong id="thresholdValue">{{ threshold }}°C</strong></div>
-
-          <!-- Replace the editable slider with a read-only temperature indicator that moves based on current temperature -->
           <div class="slider-container">
-            <input type="range" min="20" max="120" value="{{ current_temperature }}" class="slider" id="tempSlider" disabled>
+            <input type="range" min="30" max="100" value="{{ threshold }}" class="slider" id="thresholdSlider" oninput="updateThreshold(this.value)">
           </div>
-
           <div class="button-group">
-            <!-- Calibrate now POSTS to server to set baseline -->
-            <form action="/action/calibrate_sensor" method="POST" style="display:inline;">
-              <button type="submit" class="action-button">
-                <span>Calibrate</span>
-              </button>
-            </form>
-            <!-- Reset threshold to default -->
-            <form action="/action/reset_threshold" method="POST" style="display:inline;">
-              <button type="submit" class="action-button">
-                <span>Reset</span>
-              </button>
-            </form>
+            <button class="action-button" onclick="calibrateSensor()">
+              <span>Calibrate</span>
+            </button>
+            <button class="action-button" onclick="resetThreshold()">
+              <span>Reset</span>
+            </button>
           </div>
         </div>
       </div>
@@ -1278,7 +1081,236 @@ HTML_TEMPLATE = """
     <footer>
       PyroSense 2025 © All rights reserved - Python Flask Edition
     </footer>
-  </div>
+
+  <script src="https://unpkg.com/sweetalert/dist/sweetalert.min.js"></script>
+  <script>
+    // Display any flashed messages using SweetAlert
+    document.addEventListener('DOMContentLoaded', function(){
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, msg in messages %}
+            // show the sweetalert (category/msg are rendered JSON-safe)
+            (function(c,m){
+              var icon = 'info';
+              if (c == 'success') icon = 'success';
+              else if (c == 'warning') icon = 'warning';
+              else if (c == 'error') icon = 'error';
+              else if (c == 'info') icon = 'info';
+              swal({title: m, icon: icon, button: "OK"});
+            })({{ category|tojson }}, {{ msg|tojson }});
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      // Confirmation handlers for sensitive actions
+      // Clear log
+      var clearBtn = document.getElementById('clearLogBtn');
+      if (clearBtn){
+        clearBtn.addEventListener('click', function(e){
+          e.preventDefault();
+          swal({
+            title: "Clear log?",
+            text: "This will clear the local detection log. Continue?",
+            icon: "warning",
+            buttons: ["Cancel","Yes, clear"],
+            dangerMode: true
+          }).then((willClear) => {
+            if (willClear) {
+              document.getElementById('clearLogForm').submit();
+            }
+          });
+        });
+      }
+
+      // UPDATED: Ensure camera is turned OFF before navigating to History (new centered nav link)
+      var historyBtn = document.getElementById('navHistory');
+      if (historyBtn){
+        historyBtn.addEventListener('click', function(e){
+          e.preventDefault();
+          var href = historyBtn.href;
+          fetch('/api/disable_camera', {method: 'POST', credentials: 'same-origin'})
+            .catch(function(){})
+            .finally(function(){ window.location = href; });
+        });
+      }
+
+      // Export log
+      var exportBtn = document.getElementById('exportLogBtn');
+      if (exportBtn){
+        exportBtn.addEventListener('click', function(e){
+          e.preventDefault();
+          swal({
+            title: "Export log?",
+            text: "A plaintext (.txt) file will be downloaded.",
+            icon: "info",
+            buttons: ["Cancel","Export"]
+          }).then((doExport) => {
+            if (doExport) {
+              // direct download via navigation to export URL
+              window.location = "/api/export_log";
+            }
+          });
+        });
+      }
+
+      // Logout confirmation
+      var logoutBtn = document.getElementById('logoutBtn');
+      if (logoutBtn){
+        logoutBtn.addEventListener('click', function(e){
+          e.preventDefault();
+          swal({
+            title: "Log out?",
+            text: "Are you sure you want to log out?",
+            icon: "warning",
+            buttons: ["Cancel", "Yes, log out"],
+            dangerMode: true
+          }).then((willLogout) => {
+            if (willLogout) {
+              window.location = "/logout_confirm";
+            }
+          });
+        });
+      }
+    });
+  </script>
+  <script>
+    // Fullscreen helper for the live camera container
+    // Toggles fullscreen on the #videoPlayer element and updates the button label/state.
+    function toggleFullscreen() {
+      try {
+        const container = document.getElementById('videoPlayer');
+        const btn = document.getElementById('fullscreenBtn');
+        if (!container) return;
+
+        const isInFs = !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+        if (!isInFs) {
+          if (container.requestFullscreen) container.requestFullscreen();
+          else if (container.webkitRequestFullscreen) container.webkitRequestFullscreen();
+          else if (container.msRequestFullscreen) container.msRequestFullscreen();
+        } else {
+          if (document.exitFullscreen) document.exitFullscreen();
+          else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+          else if (document.msExitFullscreen) document.msExitFullscreen();
+        }
+        // Button text will be updated by the fullscreenchange handler below.
+      } catch (err) {
+        console.error('toggleFullscreen error', err);
+      }
+    }
+
+    // Update fullscreen button label/state when fullscreen changes
+    function _updateFullscreenButton() {
+      const btn = document.getElementById('fullscreenBtn');
+      if (!btn) return;
+      const inFs = !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+      btn.classList.toggle('active', inFs);
+      btn.textContent = inFs ? 'Exit Fullscreen' : 'Fullscreen';
+    }
+
+    // Listen for vendor-neutral and vendor-prefixed fullscreen change events
+    document.addEventListener('fullscreenchange', _updateFullscreenButton);
+    document.addEventListener('webkitfullscreenchange', _updateFullscreenButton);
+    document.addEventListener('msfullscreenchange', _updateFullscreenButton);
+
+    // Support pressing "F" to toggle fullscreen as a convenience
+    document.addEventListener('keydown', function(e) {
+      // ignore when focus is in an input/textarea to avoid interfering with typing
+      const tag = (document.activeElement && document.activeElement.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        toggleFullscreen();
+      }
+    });
+
+    // Ensure button is initialized correctly on page load
+    document.addEventListener('DOMContentLoaded', function(){
+      _updateFullscreenButton();
+    });
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+  <script>
+(function(){
+  try {
+    const hlsUrl = "{{ hls_url }}";
+    const thermalHlsUrl = "{{ thermal_hls_url }}";
+    const videoEl = document.getElementById('liveHls');
+    const thermalEl = document.getElementById('thermalHls');        // small preview (existing)
+    const thermalElMain = document.getElementById('thermalHls_main'); // NEW main thermal view
+    const imgFallback = document.getElementById('cameraStream');
+    const thermalImg = document.getElementById('thermalPreview');
+    const thermalImgMain = document.getElementById('thermalPreviewMain');
+
+    function attachHls(url, el, imgFallbackEl, onSuccess, onFail){
+      if (!url || url === 'None') { onFail && onFail(); return; }
+      if (el && el.canPlayType && el.canPlayType('application/vnd.apple.mpegurl')) {
+        el.src = url;
+        el.style.display = 'block';
+        if (imgFallbackEl) imgFallbackEl.style.display = 'none';
+        onSuccess && onSuccess();
+        el.play().catch(()=>{});
+      } else if (window.Hls && Hls.isSupported()) {
+        try {
+          const hls = new Hls({ liveSyncDuration: 4, maxBufferLength: 10, fragLoadingMaxRetry: 3, enableWorker: true });
+          hls.loadSource(url);
+          hls.attachMedia(el);
+          hls.on(Hls.Events.MANIFEST_PARSED, function() {
+            el.style.display = 'block';
+            if (imgFallbackEl) imgFallbackEl.style.display = 'none';
+            onSuccess && onSuccess();
+            el.play().catch(()=>{});
+          });
+          hls.on(Hls.Events.ERROR, function(event, data) {
+            if (data && data.fatal) {
+              try { hls.destroy(); } catch(e){}
+              onFail && onFail();
+            }
+          });
+        } catch (e) {
+          onFail && onFail();
+        }
+      } else {
+        onFail && onFail();
+      }
+    }
+
+    // Try to start main Pi HLS; if it works hide MJPEG fallback
+    attachHls(hlsUrl, videoEl, document.getElementById('cameraStream'),
+      function onOk(){ if (imgFallback) imgFallback.style.display = 'none'; },
+      function onFail(){ if (videoEl) videoEl.style.display = 'none'; if (imgFallback) imgFallback.style.display = 'block'; }
+    );
+
+    // Try thermal HLS small preview (existing) and main thermal view
+    attachHls(thermalHlsUrl, thermalEl, thermalImg,
+      function onOk(){ thermalImg.style.display='none'; thermalEl.style.display='block'; },
+      function onFail(){ thermalEl.style.display='none'; thermalImg.style.display='block'; }
+    );
+
+    // Also attempt to attach thermal stream into the larger Thermal Reading area (if available)
+    attachHls(thermalHlsUrl, thermalElMain, thermalImgMain,
+      function onOk(){ thermalImgMain.style.display='none'; thermalElMain.style.display='block'; },
+      function onFail(){ thermalElMain.style.display='none'; thermalImgMain.style.display='block'; }
+    );
+
+  } catch (e) {
+    console.warn('HLS init error', e);
+  }
+
+   // refresh proxied thermal thumbnail and pi snapshot to avoid caching/CORS problems
+  (function refreshPreviews(){
+    const thermalElImg = document.getElementById('thermalPreview');
+    const snapEl = document.getElementById('piSnapshot');
+    const thermalElImgMain = document.getElementById('thermalPreviewMain');
+    const t = Date.now();
+    // Use the dashboard proxy endpoints (no CORS) and append cache-buster
+    if (thermalElImg) thermalElImg.src = "/api/thermal_image?t=" + t;
+    if (thermalElImgMain) thermalElImgMain.src = "/api/thermal_image?t=" + t;
+    if (snapEl) snapEl.src = "/api/pi_snapshot?t=" + t;
+    setTimeout(refreshPreviews, 3000);
+  })();
+
+})();
+</script>
 </body>
 </html>
 """
@@ -1501,26 +1533,12 @@ FORGOT_PASSWORD_TEMPLATE = """
 """
 
 def simulate_temperature_variation():
-    """Simulate realistic temperature changes and respect camera-detected fire events."""
-    global last_fire_detection_time
-    now = time.time()
-
-    baseline = float(dashboard_state.get('baseline_temp', 34.6))
-
-    # If a recent fire was detected by RGB model, ramp toward a higher target
-    if now - last_fire_detection_time < fire_temp_persist_seconds:
-        target = max(dashboard_state['threshold'] + fire_temp_increase, dashboard_state['current_temperature'])
-        inc = random.uniform(0.6, fire_temp_rise_rate)
-        dashboard_state['current_temperature'] = min(120.0, dashboard_state['current_temperature'] + inc)
-    else:
-        # No recent camera fire: allow decay toward the calibrated baseline and small noise
-        if dashboard_state['current_temperature'] > baseline + 0.5:
-            dashboard_state['current_temperature'] = max(baseline, dashboard_state['current_temperature'] - fire_temp_decay_rate)
-        else:
-            variation = (random.random() - 0.5) * 2  # ±1 degree variation
-            dashboard_state['current_temperature'] = max(20, min(120, dashboard_state['current_temperature'] + variation))
-
-    # Check for fire conditions (keeps existing threshold logic)
+    """Simulate realistic temperature changes"""
+    variation = (random.random() - 0.5) * 2  # ±1 degree variation
+    dashboard_state['current_temperature'] = max(20, min(100, 
+        dashboard_state['current_temperature'] + variation))
+    
+    # Check for fire conditions
     if dashboard_state['current_temperature'] > dashboard_state['threshold']:
         dashboard_state['fire_status'] = 'FIRE DETECTED!'
         add_log_entry('🚨 FIRE ALERT: High temperature detected!')
@@ -1677,9 +1695,9 @@ def reset_threshold():
         'message': message
     })
 
-# --- NEW: server-side form-action endpoints for calibration and reset ---
-@app.route('/action/calibrate_sensor', methods=['POST'])
-def action_calibrate_sensor():
+# --- NEW: server-side form-action endpoints (redirect back with flash messages) ---
+@app.route('/action/toggle_camera', methods=['POST'])
+def action_toggle_camera():
     if not session.get('user'):
         flash('Authentication required', 'error')
         return redirect(url_for('index'))
@@ -1708,7 +1726,7 @@ def action_calibrate_sensor():
                     try:
                         ret, _ = video_capture.read()
                         if ret:
-                            stream_ready = True   # <-- fixed (was `true`)
+                            stream_ready = True
                     except:
                         stream_ready = bool(video_capture.isOpened())
             except Exception:
@@ -1723,16 +1741,13 @@ def action_calibrate_sensor():
             video_capture = None
         stream_ready = False
 
-    # Update UI status
-    dashboard_state['system_status']['camera'] = 'Online' if camera_enabled else 'Offline'
-
     message = 'Camera feed enabled' if camera_enabled else 'Camera feed disabled'
     add_log_entry(f"UI: {message} (ready={stream_ready})")
     flash(message, 'success')
     return redirect(url_for('index'))
 
-@app.route('/action/reset_threshold', methods=['POST'])
-def action_reset_threshold():
+@app.route('/action/toggle_recording', methods=['POST'])
+def action_toggle_recording():
     if not session.get('user'):
         flash('Authentication required', 'error')
         return redirect(url_for('index'))
@@ -1745,9 +1760,6 @@ def action_reset_threshold():
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         fname = os.path.join(recordings_dir, f"recording_{ts}.mp4")
         recording_flag = True
-
-        # Update edge status
-        dashboard_state['system_status']['edge'] = 'Recording'
 
         # stop flag accessor
         stop_ref = lambda: not recording_flag
@@ -1762,8 +1774,6 @@ def action_reset_threshold():
     else:
         # stop recording
         recording_flag = False
-        # update edge status
-        dashboard_state['system_status']['edge'] = 'Running'
         # let thread finish; do not block long
         add_log_entry('UI: Recording stopped by user')
         flash('Recording stopped', 'success')
@@ -1806,7 +1816,7 @@ def action_snapshot():
         try:
             if temp_cap_opened and cap is not None:
                 cap.release()
-        except:
+        except Exception:
             pass
 
     return redirect(url_for('index'))
@@ -1834,7 +1844,7 @@ def action_acknowledge_alert():
     with detection_lock:
         labels = list(last_detection_summary.get('labels', []))
     manual = dashboard_state.get('manual_alert')
-    if manual:
+    if (manual):
         detected = manual
     else:
         detected = ', '.join(labels) if labels else 'Nothing detected'
@@ -1843,6 +1853,7 @@ def action_acknowledge_alert():
     # Acknowledging will clear manual alert and mute overlays
     dashboard_state['manual_alert'] = None
     dashboard_state['alerts_active'] = False
+
     # keep fire_status (model) unchanged so detection history remains
     add_log_entry(message)
     flash(message, 'success')
@@ -1880,31 +1891,6 @@ def action_restart_system():
     message = 'Python system restart initiated...'
     add_log_entry(message)
     flash('System restart initiated', 'info')
-
-    # set UI state
-    dashboard_state['system_status']['edge'] = 'Restarting'
-
-    # spawn background thread to perform restart after a short delay
-    def _do_restart():
-        try:
-            time.sleep(1.0)
-            add_log_entry("System: performing process restart via execv")
-            # re-exec the current Python interpreter with same args
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-        except Exception as e:
-            add_log_entry(f"System restart failed: {e}")
-            # if execv fails, attempt to exit so an external supervisor can restart
-            try:
-                os._exit(0)
-            except:
-                pass
-
-    try:
-        t = threading.Thread(target=_do_restart, daemon=True)
-        t.start()
-    except Exception as e:
-        add_log_entry(f"Restart scheduling failed: {e}")
-
     return redirect(url_for('index'))
 
 @app.route('/logout_confirm')
@@ -1992,33 +1978,18 @@ def action_clear_log():
     flash('Log cleared', 'success')
     return redirect(url_for('index'))
 
-# --- NEW: Internet connectivity monitor to update system status periodically ---
-def internet_monitor():
-    while True:
-        try:
-            # quick lightweight check to public DNS
-            sock = socket.create_connection(("8.8.8.8", 53), timeout=1.0)
-            sock.close()
-            dashboard_state['system_status']['internet'] = 'Connected'
-        except Exception:
-            dashboard_state['system_status']['internet'] = 'Disconnected'
-        time.sleep(10)
-
-# Start internet monitor thread
-internet_thread = threading.Thread(target=internet_monitor, daemon=True)
-internet_thread.start()
-
 if __name__ == '__main__':
     print("🐍 Starting PyroSense Python Flask Dashboard...")
     print("🔥 Fire Detection System - Python Edition")
     print("=" * 50)
-    try:
-        hostname = socket.gethostname()
-        local_ip = socket.gethostbyname(hostname)
-        print(f"Host: {hostname}  IP: {local_ip}")
-    except Exception:
-        pass
     print("Dashboard URL: http://localhost:5002")
+    print("Features:")
+    print("  • Real-time temperature monitoring")
+    print("  • Python-powered analytics")
+    print("  • Interactive controls via Flask API")
+    print("  • Background temperature simulation")
     print("To stop server: Press Ctrl+C")
     print("=" * 50)
+    
+    # Run the Flask development server on port 5002
     app.run(debug=True, host='0.0.0.0', port=5002)
