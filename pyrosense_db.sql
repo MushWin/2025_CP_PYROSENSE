@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS Users (
     UserID INTEGER PRIMARY KEY AUTOINCREMENT,
     Username TEXT UNIQUE NOT NULL,
     Password TEXT NOT NULL,
-    Email TEXT UNIQUE
+    Email TEXT UNIQUE,
+    UserRole TEXT DEFAULT 'user'
 );
 
 CREATE TABLE IF NOT EXISTS Devices (
@@ -47,6 +48,14 @@ CREATE TABLE IF NOT EXISTS System_Logs (
     UserID INTEGER,
     FOREIGN KEY (DeviceID) REFERENCES Devices(DeviceID) ON DELETE SET NULL,
     FOREIGN KEY (UserID) REFERENCES Users(UserID) ON DELETE SET NULL
+);
+
+-- PasswordResets table for password reset tokens
+CREATE TABLE IF NOT EXISTS PasswordResets (
+    Token TEXT PRIMARY KEY,
+    UserID INTEGER NOT NULL,
+    ExpiresAt TEXT NOT NULL,
+    FOREIGN KEY (UserID) REFERENCES Users(UserID) ON DELETE CASCADE
 );
 
 -- Indexes for common queries
