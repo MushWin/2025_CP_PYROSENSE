@@ -15,8 +15,8 @@ import numpy as np  # ADDED: NumPy for image processing
 import os  # ADDED: missing os import used by model file helpers
 import glob
 import pathlib
-import sys            # <-- NEW
-import socket         # <-- NEW
+import urllib.request
+import urllib.error
 
 app = Flask(__name__)
 # Add the same secret key as login.py for shared sessions
@@ -33,7 +33,7 @@ dashboard_state = {
     'fire_status': 'No fire detected',
     'system_status': {
         'camera': 'Online',
-        'thermal': 'Offline',   # always Offline unless you implement it
+        'thermal': 'OK', 
         'edge': 'Running',
         'internet': 'Connected'
     },
@@ -86,6 +86,77 @@ recording_writer = None
 
 # Manual alert (set by Test Alert) — displayed separately from model detections
 dashboard_state.setdefault('manual_alert', None)
+
+# --- NEW: Raspberry Pi connection configuration + simple HTTP helpers/proxy ---
+# Set these via environment variables if you need to change them
+PI_HOST = "192.168.1.110"
+PI_THERMAL_PORT = 8055
+PI_HLS_PATH = os.environ.get("PI_HLS_PATH", "/pyrosense/stream.m3u8")
+# NEW: thermal HLS path (if your thermal cam streams HLS)
+PI_THERMAL_HLS_PATH = os.environ.get("PI_THERMAL_HLS_PATH", "/pyrosense/thermal_stream.m3u8")
+PI_SNAPSHOT_PATH = os.environ.get("PI_SNAPSHOT_PATH", "/cam.jpg")
+PI_REQUEST_TIMEOUT = float(os.environ.get("PI_REQUEST_TIMEOUT", "0.9"))
+
+def _rebuild_pi_urls():
+    global HLS_URL, THERMAL_PNG, THERMAL_JSON, THERMAL_HLS_URL
+    HLS_URL = f"http://{PI_HOST}{PI_HLS_PATH}"
+    THERMAL_PNG = f"http://{PI_HOST}:{PI_THERMAL_PORT}/thermal.png"
+    THERMAL_JSON = f"http://{PI_HOST}:{PI_THERMAL_PORT}/thermal.json"
+    # NEW: build thermal HLS URL (may be same host but different path/port)
+    THERMAL_HLS_URL = f"http://{PI_HOST}{PI_THERMAL_HLS_PATH}"
+
+_rebuild_pi_urls()
+
+def _fetch_bytes(url, timeout=PI_REQUEST_TIMEOUT):
+    """Return (bytes, headers) or (None, None) on failure."""
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'PyroSense-Dashboard/1.0'})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read(), getattr(r, 'headers', None)
+    except Exception:
+        return None, None
+
+def fetch_pi_snapshot(timeout=PI_REQUEST_TIMEOUT):
+    path = PI_SNAPSHOT_PATH if PI_SNAPSHOT_PATH.startswith('/') else '/' + PI_SNAPSHOT_PATH
+    url = f"http://{PI_HOST}:{PI_THERMAL_PORT}{path}"
+    data, _ = _fetch_bytes(url, timeout=timeout)
+    # basic JPEG sanity check
+    if data and data[:2] == b'\xff\xd8':
+        return data
+    return None
+
+# Proxy endpoints to avoid CORS / mixed-content issues when dashboard fetches Pi images
+@app.route('/api/thermal_image')
+def proxy_thermal_image():
+    """Proxy MLX thermal PNG from the Pi so browser can fetch without CORS."""
+    try:
+        data, headers = _fetch_bytes(THERMAL_PNG, timeout=1.2)
+        if not data:
+            return jsonify({'error': 'thermal_unavailable'}), 502
+        ctype = 'image/png'
+        try:
+            if headers and hasattr(headers, 'get_content_type'):
+                ctype = headers.get_content_type()
+        except Exception:
+            pass
+        resp = Response(data, mimetype=ctype)
+        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        return resp
+    except Exception as e:
+        return jsonify({'error': 'thermal_proxy_error', 'detail': str(e)}), 502
+
+@app.route('/api/pi_snapshot')
+def api_pi_snapshot():
+    """Proxy Pi camera single-frame JPEG snapshot (no auth)."""
+    try:
+        data = fetch_pi_snapshot(timeout=1.2)
+        if not data:
+            return jsonify({'error': 'snapshot_unavailable'}), 502
+        resp = Response(data, mimetype='image/jpeg')
+        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        return resp
+    except Exception as e:
+        return jsonify({'error': 'snapshot_proxy_error', 'detail': str(e)}), 502
 
 # Helper: locate model files in common locations (returns dict with keys 'cfg','weights','names' or {} if none)
 def find_fire_model_files(model_dirs=None):
@@ -319,8 +390,6 @@ def load_fire_model():
 	files = find_fire_model_files()
 	if not files:
 		add_log_entry("Fire model: model folder not found (no cfg/weights/names discovered)")
-		# update thermal sensor status
-		dashboard_state['system_status']['thermal'] = 'Unavailable'
 		return False
 	cfg = files.get('cfg')
 	weights = files.get('weights')
@@ -370,36 +439,20 @@ def load_fire_model():
 		add_log_entry(f"Fire model loaded: {os.path.basename(weights)} ({len(classes)} classes) - names:{os.path.basename(names)}")
 		# Enable overlay automatically when the model successfully loads (so boxes appear without extra toggle)
 		fire_model_enabled = True
-
-		# Update thermal sensor status to indicate model-backed sensor available
-		dashboard_state['system_status']['thermal'] = 'OK'
 		return True
 	except Exception as e:
 		add_log_entry(f"Fire model load failed: {e}")
 		fire_model_loaded = False
-		# Reflect thermal sensor problem in status panel
-		dashboard_state['system_status']['thermal'] = 'Unavailable'
 		return False
 
-# --- UPDATED: remove automatic model load at definition-time ---
 # Attempt to load at startup (non-blocking attempt) and enable overlay if successful
-# try:
-# 	_ok = load_fire_model()
-# 	# load_fire_model sets fire_model_enabled True on success; ensure it's set here as well for clarity
-# 	if _ok:
-# 		fire_model_enabled = True
-# except Exception:
-# 	pass
-
-# --- ADDED: safe startup attempt to load model (after logging and background thread exist) ---
-# REMOVE automatic model load here as well so thermal stays Offline until explicitly loaded.
-# (delete or comment out the block below if present)
-# try:
-#     loaded = load_fire_model()
-#     if loaded:
-#         fire_model_enabled = True
-# except Exception:
-#     pass
+try:
+	_ok = load_fire_model()
+	# load_fire_model sets fire_model_enabled True on success; ensure it's set here as well for clarity
+	if _ok:
+		fire_model_enabled = True
+except Exception:
+	pass
 
 # --- NEW: recording loop used when recording is toggled ON ---
 def _recording_loop(filename, stop_flag_ref):
@@ -749,9 +802,6 @@ def api_toggle_camera_feed():
 			video_capture = None
 		stream_ready = False
 
-	# Update dashboard system status for camera
-	dashboard_state['system_status']['camera'] = 'Online' if camera_enabled else 'Offline'
-
 	message = 'Camera feed enabled' if camera_enabled else 'Camera feed disabled'
 	add_log_entry(f"UI: {message} (ready={stream_ready})")
 	return jsonify({'success': True, 'camera_enabled': camera_enabled, 'stream_ready': stream_ready, 'message': message})
@@ -761,8 +811,7 @@ def api_toggle_camera_feed():
 def api_camera_feed_status():
     if not session.get('user'):
         return jsonify({'error':'Authentication required'}), 401
-    # ensure we return the live camera_enabled-based status
-    return jsonify({'camera_enabled': camera_enabled, 'camera_status': dashboard_state['system_status'].get('camera','Offline')})
+    return jsonify({'camera_enabled': camera_enabled})
 
 # API to force-disable camera (used before navigating to History)
 @app.route('/api/disable_camera', methods=['POST'])
@@ -779,8 +828,6 @@ def api_disable_camera():
                 except:
                     pass
                 video_capture = None
-            # reflect status in UI
-            dashboard_state['system_status']['camera'] = 'Offline'
             add_log_entry('UI: Camera disabled (navigation to history)')
             return jsonify({'success': True, 'camera_enabled': camera_enabled})
         except Exception as e:
@@ -795,24 +842,6 @@ HTML_TEMPLATE = """
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PyroSense Dashboard - Python Edition</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
-  <style>
-    .status-indicator {
-      display: inline-block;
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      margin-right: 8px;
-    }
-    .status-indicator.green {
-      background-color: #28a745;
-    }
-    .status-indicator.red {
-      background-color: #dc3545;
-    }
-    .status-indicator.blue {
-      background-color: #007bff;
-    }
-  </style>
 </head>
 <body>
   <div class="dashboard-overlay">
@@ -856,11 +885,29 @@ HTML_TEMPLATE = """
         </div>
         <div class="card-content">
           <!-- Replaced static box with live MJPEG stream + controls -->
+         
           <div class="video-player" id="videoPlayer">
             <div class="video-topbar">
               <div class="video-badge" id="streamStatus">Scanning for fire...</div>
             </div>
-            <img id="cameraStream" class="stream" src="/video_feed" alt="Live camera stream">
+             <video id="liveHls" controls playsinline muted
+                     style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;border-radius:12px;display:none;"></video>
+
+            <div id="cameraContainer" style="position:relative;width:100%;height:100%;">
+              <!-- HLS (Pi main camera) - hidden until available -->
+              
+              <!-- Thermal HLS or proxied thermal thumbnail -->
+              <div style="position:absolute;right:12px;top:12px;z-index:25;display:flex;flex-direction:column;gap:8px;">
+                <video id="thermalHls" playsinline muted loop autoplay
+                       style="width:180px;height:120px;border-radius:8px;border:2px solid rgba(255,255,255,0.6);object-fit:cover;display:none;"></video>
+                
+              <img id="thermalPreviewMain" src="/api/thermal_image"
+     style="width:100%;height:220px;object-fit:cover;display:block;" />
+                <img id="piSnapshot" src="{{ pi_snapshot }}" alt="Pi Cam snapshot"
+                     style="width:140px;height:90px;border-radius:8px;border:2px solid rgba(255,255,255,0.5);object-fit:cover;box-shadow:0 6px 12px rgba(0,0,0,0.25);" />
+              </div>
+            </div>
+
             <div class="video-controls">
               <!-- Removed Toggle Fire button and Minimize button per request -->
               <button class="video-control-btn" id="fullscreenBtn" onclick="toggleFullscreen()">Fullscreen</button>
@@ -906,6 +953,16 @@ HTML_TEMPLATE = """
           <h2 class="card-title">Thermal Reading</h2>
         </div>
         <div class="card-content">
+          <!-- ADDED: Thermal visual (HLS primary, image fallback) -->
+          <div style="margin-bottom:12px;">
+            <div style="width:100%;border-radius:12px;overflow:hidden;background:#000;box-shadow:0 8px 20px rgba(0,0,0,0.25);">
+              <video id="thermalHls_main" playsinline muted loop
+                     style="width:100%;height:220px;object-fit:cover;display:none;"></video>
+              <img id="thermalPreviewMain" src="{{ thermal_png }}" alt="Thermal preview"
+                   style="width:100%;height:220px;object-fit:cover;display:block;" />
+            </div>
+          </div>
+
           <div class="temperature-display" id="currentTemp">{{ current_temperature }}°C</div>
           <div class="threshold-info">Heat Threshold: <strong id="thresholdValue">{{ threshold }}°C</strong></div>
           <div class="slider-container">
@@ -979,37 +1036,37 @@ HTML_TEMPLATE = """
       <div class="card" style="grid-column: span 2;">
         <div class="card-header">
           <div class="card-icon">💻</div>
-          <h2 class="card-title">System Status</h2>
+          <h2 class="card-title">Device Status</h2>
         </div>
         <div class="card-content">
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
             <div class="device-row">
               <div class="device-name">
-                <span class="status-indicator {{ camera_indicator }}"></span>
+                <span class="status-indicator green"></span>
                 <span>RGB Camera:</span>
               </div>
-              <span class="status-value {{ camera_value_class }}" id="cameraStatus">{{ system_status.camera }}</span>
+              <span class="status-value" id="cameraStatus">{{ system_status.camera }}</span>
             </div>
             <div class="device-row">
               <div class="device-name">
-                <span class="status-indicator {{ thermal_indicator }}"></span>
+                <span class="status-indicator green"></span>
                 <span>Thermal Sensor:</span>
               </div>
-              <span class="status-value {{ thermal_value_class }}" id="thermalStatus">{{ system_status.thermal }}</span>
+              <span class="status-value ok" id="thermalStatus">{{ system_status.thermal }}</span>
             </div>
             <div class="device-row">
               <div class="device-name">
-                <span class="status-indicator {{ edge_indicator }}"></span>
+                <span class="status-indicator green"></span>
                 <span>Edge System:</span>
               </div>
-              <span class="status-value {{ edge_value_class }}" id="edgeStatus">{{ system_status.edge }}</span>
+              <span class="status-value running" id="edgeStatus">{{ system_status.edge }}</span>
             </div>
             <div class="device-row">
               <div class="device-name">
-                <span class="status-indicator {{ internet_indicator }}"></span>
+                <span class="status-indicator green"></span>
                 <span>Internet:</span>
               </div>
-              <span class="status-value {{ internet_value_class }}" id="internetStatus">{{ system_status.internet }}</span>
+              <span class="status-value connected" id="internetStatus">{{ system_status.internet }}</span>
             </div>
           </div>
           <div class="button-group" style="margin-top: 15px;">
@@ -1024,7 +1081,236 @@ HTML_TEMPLATE = """
     <footer>
       PyroSense 2025 © All rights reserved - Python Flask Edition
     </footer>
-  </div>
+
+  <script src="https://unpkg.com/sweetalert/dist/sweetalert.min.js"></script>
+  <script>
+    // Display any flashed messages using SweetAlert
+    document.addEventListener('DOMContentLoaded', function(){
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, msg in messages %}
+            // show the sweetalert (category/msg are rendered JSON-safe)
+            (function(c,m){
+              var icon = 'info';
+              if (c == 'success') icon = 'success';
+              else if (c == 'warning') icon = 'warning';
+              else if (c == 'error') icon = 'error';
+              else if (c == 'info') icon = 'info';
+              swal({title: m, icon: icon, button: "OK"});
+            })({{ category|tojson }}, {{ msg|tojson }});
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      // Confirmation handlers for sensitive actions
+      // Clear log
+      var clearBtn = document.getElementById('clearLogBtn');
+      if (clearBtn){
+        clearBtn.addEventListener('click', function(e){
+          e.preventDefault();
+          swal({
+            title: "Clear log?",
+            text: "This will clear the local detection log. Continue?",
+            icon: "warning",
+            buttons: ["Cancel","Yes, clear"],
+            dangerMode: true
+          }).then((willClear) => {
+            if (willClear) {
+              document.getElementById('clearLogForm').submit();
+            }
+          });
+        });
+      }
+
+      // UPDATED: Ensure camera is turned OFF before navigating to History (new centered nav link)
+      var historyBtn = document.getElementById('navHistory');
+      if (historyBtn){
+        historyBtn.addEventListener('click', function(e){
+          e.preventDefault();
+          var href = historyBtn.href;
+          fetch('/api/disable_camera', {method: 'POST', credentials: 'same-origin'})
+            .catch(function(){})
+            .finally(function(){ window.location = href; });
+        });
+      }
+
+      // Export log
+      var exportBtn = document.getElementById('exportLogBtn');
+      if (exportBtn){
+        exportBtn.addEventListener('click', function(e){
+          e.preventDefault();
+          swal({
+            title: "Export log?",
+            text: "A plaintext (.txt) file will be downloaded.",
+            icon: "info",
+            buttons: ["Cancel","Export"]
+          }).then((doExport) => {
+            if (doExport) {
+              // direct download via navigation to export URL
+              window.location = "/api/export_log";
+            }
+          });
+        });
+      }
+
+      // Logout confirmation
+      var logoutBtn = document.getElementById('logoutBtn');
+      if (logoutBtn){
+        logoutBtn.addEventListener('click', function(e){
+          e.preventDefault();
+          swal({
+            title: "Log out?",
+            text: "Are you sure you want to log out?",
+            icon: "warning",
+            buttons: ["Cancel", "Yes, log out"],
+            dangerMode: true
+          }).then((willLogout) => {
+            if (willLogout) {
+              window.location = "/logout_confirm";
+            }
+          });
+        });
+      }
+    });
+  </script>
+  <script>
+    // Fullscreen helper for the live camera container
+    // Toggles fullscreen on the #videoPlayer element and updates the button label/state.
+    function toggleFullscreen() {
+      try {
+        const container = document.getElementById('videoPlayer');
+        const btn = document.getElementById('fullscreenBtn');
+        if (!container) return;
+
+        const isInFs = !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+        if (!isInFs) {
+          if (container.requestFullscreen) container.requestFullscreen();
+          else if (container.webkitRequestFullscreen) container.webkitRequestFullscreen();
+          else if (container.msRequestFullscreen) container.msRequestFullscreen();
+        } else {
+          if (document.exitFullscreen) document.exitFullscreen();
+          else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+          else if (document.msExitFullscreen) document.msExitFullscreen();
+        }
+        // Button text will be updated by the fullscreenchange handler below.
+      } catch (err) {
+        console.error('toggleFullscreen error', err);
+      }
+    }
+
+    // Update fullscreen button label/state when fullscreen changes
+    function _updateFullscreenButton() {
+      const btn = document.getElementById('fullscreenBtn');
+      if (!btn) return;
+      const inFs = !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+      btn.classList.toggle('active', inFs);
+      btn.textContent = inFs ? 'Exit Fullscreen' : 'Fullscreen';
+    }
+
+    // Listen for vendor-neutral and vendor-prefixed fullscreen change events
+    document.addEventListener('fullscreenchange', _updateFullscreenButton);
+    document.addEventListener('webkitfullscreenchange', _updateFullscreenButton);
+    document.addEventListener('msfullscreenchange', _updateFullscreenButton);
+
+    // Support pressing "F" to toggle fullscreen as a convenience
+    document.addEventListener('keydown', function(e) {
+      // ignore when focus is in an input/textarea to avoid interfering with typing
+      const tag = (document.activeElement && document.activeElement.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        toggleFullscreen();
+      }
+    });
+
+    // Ensure button is initialized correctly on page load
+    document.addEventListener('DOMContentLoaded', function(){
+      _updateFullscreenButton();
+    });
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+  <script>
+(function(){
+  try {
+    const hlsUrl = "{{ hls_url }}";
+    const thermalHlsUrl = "{{ thermal_hls_url }}";
+    const videoEl = document.getElementById('liveHls');
+    const thermalEl = document.getElementById('thermalHls');        // small preview (existing)
+    const thermalElMain = document.getElementById('thermalHls_main'); // NEW main thermal view
+    const imgFallback = document.getElementById('cameraStream');
+    const thermalImg = document.getElementById('thermalPreview');
+    const thermalImgMain = document.getElementById('thermalPreviewMain');
+
+    function attachHls(url, el, imgFallbackEl, onSuccess, onFail){
+      if (!url || url === 'None') { onFail && onFail(); return; }
+      if (el && el.canPlayType && el.canPlayType('application/vnd.apple.mpegurl')) {
+        el.src = url;
+        el.style.display = 'block';
+        if (imgFallbackEl) imgFallbackEl.style.display = 'none';
+        onSuccess && onSuccess();
+        el.play().catch(()=>{});
+      } else if (window.Hls && Hls.isSupported()) {
+        try {
+          const hls = new Hls({ liveSyncDuration: 4, maxBufferLength: 10, fragLoadingMaxRetry: 3, enableWorker: true });
+          hls.loadSource(url);
+          hls.attachMedia(el);
+          hls.on(Hls.Events.MANIFEST_PARSED, function() {
+            el.style.display = 'block';
+            if (imgFallbackEl) imgFallbackEl.style.display = 'none';
+            onSuccess && onSuccess();
+            el.play().catch(()=>{});
+          });
+          hls.on(Hls.Events.ERROR, function(event, data) {
+            if (data && data.fatal) {
+              try { hls.destroy(); } catch(e){}
+              onFail && onFail();
+            }
+          });
+        } catch (e) {
+          onFail && onFail();
+        }
+      } else {
+        onFail && onFail();
+      }
+    }
+
+    // Try to start main Pi HLS; if it works hide MJPEG fallback
+    attachHls(hlsUrl, videoEl, document.getElementById('cameraStream'),
+      function onOk(){ if (imgFallback) imgFallback.style.display = 'none'; },
+      function onFail(){ if (videoEl) videoEl.style.display = 'none'; if (imgFallback) imgFallback.style.display = 'block'; }
+    );
+
+    // Try thermal HLS small preview (existing) and main thermal view
+    attachHls(thermalHlsUrl, thermalEl, thermalImg,
+      function onOk(){ thermalImg.style.display='none'; thermalEl.style.display='block'; },
+      function onFail(){ thermalEl.style.display='none'; thermalImg.style.display='block'; }
+    );
+
+    // Also attempt to attach thermal stream into the larger Thermal Reading area (if available)
+    attachHls(thermalHlsUrl, thermalElMain, thermalImgMain,
+      function onOk(){ thermalImgMain.style.display='none'; thermalElMain.style.display='block'; },
+      function onFail(){ thermalElMain.style.display='none'; thermalImgMain.style.display='block'; }
+    );
+
+  } catch (e) {
+    console.warn('HLS init error', e);
+  }
+
+   // refresh proxied thermal thumbnail and pi snapshot to avoid caching/CORS problems
+  (function refreshPreviews(){
+    const thermalElImg = document.getElementById('thermalPreview');
+    const snapEl = document.getElementById('piSnapshot');
+    const thermalElImgMain = document.getElementById('thermalPreviewMain');
+    const t = Date.now();
+    // Use the dashboard proxy endpoints (no CORS) and append cache-buster
+    if (thermalElImg) thermalElImg.src = "/api/thermal_image?t=" + t;
+    if (thermalElImgMain) thermalElImgMain.src = "/api/thermal_image?t=" + t;
+    if (snapEl) snapEl.src = "/api/pi_snapshot?t=" + t;
+    setTimeout(refreshPreviews, 3000);
+  })();
+
+})();
+</script>
 </body>
 </html>
 """
@@ -1295,35 +1581,6 @@ def dashboard():
         # If no user in session, redirect to login page
         return redirect('http://localhost:5000/login')
     
-    # Force thermal sensor status to "Offline" for now
-    dashboard_state['system_status']['thermal'] = 'Offline'
-
-    # Compute indicator CSS classes based on current system_status values
-    def _indicator(status):
-        s = (status or '').lower()
-        if any(x in s for x in ['online', 'ok', 'connected']):
-            return 'green'
-        if any(x in s for x in ['running']):
-            return 'blue'
-        return 'red'
-
-    def _value_class(status):
-        s = (status or '').lower()
-        if 'offline' in s or 'unavailable' in s:
-            return 'offline'
-        if 'connected' in s:
-            return 'connected'
-        if 'online' in s or 'ok' in s:
-            return 'ok'
-        if 'running' in s:
-            return 'running'
-        return ''
-
-    camera_stat = dashboard_state['system_status'].get('camera', 'Offline')
-    thermal_stat = dashboard_state['system_status'].get('thermal', 'Offline')
-    edge_stat = dashboard_state['system_status'].get('edge', 'Running')
-    internet_stat = dashboard_state['system_status'].get('internet', 'Disconnected')
-
     template_data = {
         'current_temperature': round(dashboard_state['current_temperature'], 1),
         'threshold': dashboard_state['threshold'],
@@ -1336,16 +1593,12 @@ def dashboard():
         'log_entries': dashboard_state['log_entries'][:10],  # Show only recent 10
         'last_update': datetime.now().strftime('%m/%d/%Y %H:%M:%S'),
         'username': session.get('name', 'User'),  # Add username from session
-        # indicator classes sent to template
-        'camera_indicator': _indicator(camera_stat),
-        'thermal_indicator': _indicator(thermal_stat),
-        'edge_indicator': _indicator(edge_stat),
-        'internet_indicator': _indicator(internet_stat),
-        # value pill classes for consistent styling (used in template)
-        'camera_value_class': _value_class(camera_stat),
-        'thermal_value_class': _value_class(thermal_stat),
-        'edge_value_class': _value_class(edge_stat),
-        'internet_value_class': _value_class(internet_stat),
+
+        # NEW: expose HLS URLs and proxied thermal/image endpoints to the template JS
+        'hls_url': HLS_URL,
+        'thermal_hls_url': THERMAL_HLS_URL,
+      'thermal_png': f"http://{PI_HOST}:{PI_THERMAL_PORT}/thermal.png",
+        'pi_snapshot': '/api/pi_snapshot'
     }
     return render_template_string(HTML_TEMPLATE, **template_data)
 
@@ -1372,14 +1625,13 @@ def get_status():
 def toggle_recording():
     """Toggle recording state"""
     dashboard_state['is_recording'] = not dashboard_state['is_recording']
-    # reflect on edge system status
-    dashboard_state['system_status']['edge'] = 'Recording' if dashboard_state['is_recording'] else 'Running'
     message = 'Python recording started' if dashboard_state['is_recording'] else 'Python recording stopped'
     add_log_entry(message)
     
     return jsonify({
         'success': True,
         'is_recording': dashboard_state['is_recording'],
+
         'message': message
     })
 
@@ -1474,7 +1726,7 @@ def action_toggle_camera():
                     try:
                         ret, _ = video_capture.read()
                         if ret:
-                            stream_ready = True   # <-- fixed (was `true`)
+                            stream_ready = True
                     except:
                         stream_ready = bool(video_capture.isOpened())
             except Exception:
@@ -1488,9 +1740,6 @@ def action_toggle_camera():
                 pass
             video_capture = None
         stream_ready = False
-
-    # Update UI status
-    dashboard_state['system_status']['camera'] = 'Online' if camera_enabled else 'Offline'
 
     message = 'Camera feed enabled' if camera_enabled else 'Camera feed disabled'
     add_log_entry(f"UI: {message} (ready={stream_ready})")
@@ -1512,9 +1761,6 @@ def action_toggle_recording():
         fname = os.path.join(recordings_dir, f"recording_{ts}.mp4")
         recording_flag = True
 
-        # Update edge status
-        dashboard_state['system_status']['edge'] = 'Recording'
-
         # stop flag accessor
         stop_ref = lambda: not recording_flag
 
@@ -1528,8 +1774,6 @@ def action_toggle_recording():
     else:
         # stop recording
         recording_flag = False
-        # update edge status
-        dashboard_state['system_status']['edge'] = 'Running'
         # let thread finish; do not block long
         add_log_entry('UI: Recording stopped by user')
         flash('Recording stopped', 'success')
@@ -1572,7 +1816,7 @@ def action_snapshot():
         try:
             if temp_cap_opened and cap is not None:
                 cap.release()
-        except:
+        except Exception:
             pass
 
     return redirect(url_for('index'))
@@ -1600,7 +1844,7 @@ def action_acknowledge_alert():
     with detection_lock:
         labels = list(last_detection_summary.get('labels', []))
     manual = dashboard_state.get('manual_alert')
-    if manual:
+    if (manual):
         detected = manual
     else:
         detected = ', '.join(labels) if labels else 'Nothing detected'
@@ -1609,6 +1853,7 @@ def action_acknowledge_alert():
     # Acknowledging will clear manual alert and mute overlays
     dashboard_state['manual_alert'] = None
     dashboard_state['alerts_active'] = False
+
     # keep fire_status (model) unchanged so detection history remains
     add_log_entry(message)
     flash(message, 'success')
@@ -1646,31 +1891,6 @@ def action_restart_system():
     message = 'Python system restart initiated...'
     add_log_entry(message)
     flash('System restart initiated', 'info')
-
-    # set UI state
-    dashboard_state['system_status']['edge'] = 'Restarting'
-
-    # spawn background thread to perform restart after a short delay
-    def _do_restart():
-        try:
-            time.sleep(1.0)
-            add_log_entry("System: performing process restart via execv")
-            # re-exec the current Python interpreter with same args
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-        except Exception as e:
-            add_log_entry(f"System restart failed: {e}")
-            # if execv fails, attempt to exit so an external supervisor can restart
-            try:
-                os._exit(0)
-            except:
-                pass
-
-    try:
-        t = threading.Thread(target=_do_restart, daemon=True)
-        t.start()
-    except Exception as e:
-        add_log_entry(f"Restart scheduling failed: {e}")
-
     return redirect(url_for('index'))
 
 @app.route('/logout_confirm')
@@ -1757,22 +1977,6 @@ def action_clear_log():
     add_log_entry('User cleared the log')
     flash('Log cleared', 'success')
     return redirect(url_for('index'))
-
-# --- NEW: Internet connectivity monitor to update system status periodically ---
-def internet_monitor():
-    while True:
-        try:
-            # quick lightweight check to public DNS
-            sock = socket.create_connection(("8.8.8.8", 53), timeout=1.0)
-            sock.close()
-            dashboard_state['system_status']['internet'] = 'Connected'
-        except Exception:
-            dashboard_state['system_status']['internet'] = 'Disconnected'
-        time.sleep(10)
-
-# Start internet monitor thread
-internet_thread = threading.Thread(target=internet_monitor, daemon=True)
-internet_thread.start()
 
 if __name__ == '__main__':
     print("🐍 Starting PyroSense Python Flask Dashboard...")
