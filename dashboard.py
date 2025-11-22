@@ -1296,18 +1296,23 @@ HTML_TEMPLATE = """
     console.warn('HLS init error', e);
   }
 
-   // refresh proxied thermal thumbnail and pi snapshot to avoid caching/CORS problems
+     // refresh thermal PNG + Pi snapshot frequently -> "video" effect for thermal
   (function refreshPreviews(){
     const thermalElImg = document.getElementById('thermalPreview');
-    const snapEl = document.getElementById('piSnapshot');
     const thermalElImgMain = document.getElementById('thermalPreviewMain');
+    const snapEl = document.getElementById('piSnapshot');
     const t = Date.now();
-    // Use the dashboard proxy endpoints (no CORS) and append cache-buster
-    if (thermalElImg) thermalElImg.src = "/api/thermal_image?t=" + t;
-    if (thermalElImgMain) thermalElImgMain.src = "/api/thermal_image?t=" + t;
-    if (snapEl) snapEl.src = "/api/pi_snapshot?t=" + t;
-    setTimeout(refreshPreviews, 3000);
+
+    // both thermal thumbnails ask the Flask proxy, which pulls from the Pi
+    if (thermalElImg)      thermalElImg.src      = "/api/thermal_image?t=" + t;
+    if (thermalElImgMain)  thermalElImgMain.src  = "/api/thermal_image?t=" + t;
+    if (snapEl)            snapEl.src            = "/api/pi_snapshot?t=" + t;
+
+    // ~5 FPS – adjust (100 = 10 FPS, 500 = 2 FPS, etc.)
+    setTimeout(refreshPreviews, 200);
   })();
+
+
 
 })();
 </script>
