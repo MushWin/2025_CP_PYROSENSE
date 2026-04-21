@@ -12,58 +12,54 @@ import csv
 import io
 import os
 import zipfile
+from logic_history import generate_historical_data, calculate_statistics, filter_data
+import sqlite3
+
+DB_PATH = "/home/admin/pyrosense/2025_CP_PYROSENSE/pyrosense_logs.db"
+
+
+
+def get_logs_from_db():
+
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
+
+    c = conn.cursor()
+    c.execute("SELECT * FROM logs ORDER BY id DESC")
+
+    rows = c.fetchall()
+    conn.close()
+
+    records = []
+
+    for row in rows:
+        records.append({
+            "timestamp": row["timestamp"],
+            "temperature": round(row["temperature"], 2),
+            "alert_level": f"LEVEL {row['level']}",
+            "status": row["status"],
+            "fire_detected": row["level"] >= 2,
+            "fire_size_pct": 0,
+            "has_stove": False,
+            "has_candle": False,
+            "has_person": False,
+            "confidence": 0,
+            "location": "PyroSense Device",
+            "camera_status": "Active",
+            "thermal_status": "Active"
+        })
+
+    return records
 
 # Use a consistent secret key across both applications
 app = Flask(__name__)
 app.secret_key = 'pyrosense_shared_secret_key'  # Use the same key in both apps
 
-# Generate sample historical data
-def generate_historical_data():
-    """Generate realistic historical fire detection data"""
-    data = []
-    base_date = datetime.now() - timedelta(days=30)
-    
-    for i in range(720):  # 30 days * 24 hours
-        timestamp = base_date + timedelta(hours=i)
-        
-        # Simulate temperature patterns (higher during day, cooler at night)
-        hour = timestamp.hour
-        base_temp = 25 + 10 * (1 + 0.3 * random.random()) * abs(12 - hour) / 12
-        temp_variation = (random.random() - 0.5) * 5
-        temperature = round(base_temp + temp_variation, 1)
-        
-        # Simulate fire events (rare)
-        fire_detected = temperature > 65 and random.random() < 0.02
-        
-        # Generate alert levels
-        if fire_detected:
-            alert_level = "High"
-        elif temperature > 50:
-            alert_level = "Medium"
-        elif temperature > 40:
-            alert_level = "Low"
-        else:
-            alert_level = "None"
-        
-        # Device status (occasionally offline)
-        camera_status = "Offline" if random.random() < 0.05 else "Online"
-        thermal_status = "Error" if random.random() < 0.03 else "OK"
-        
-        data.append({
-            'timestamp': timestamp.strftime('%Y-%m-%d %H:%M:%S'),
-            'temperature': temperature,
-            'fire_detected': fire_detected,
-            'alert_level': alert_level,
-            'camera_status': camera_status,
-            'thermal_status': thermal_status,
-            'location': f"Sector {random.randint(1, 8)}",
-            'confidence': round(random.uniform(0.7, 0.99), 2) if fire_detected else round(random.uniform(0.1, 0.3), 2)
-        })
-    
-    return data
-
 # Global historical data
-historical_data = generate_historical_data()
+historical_data = get_logs_from_db()
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -75,13 +71,96 @@ HTML_TEMPLATE = """
    <link rel="stylesheet" href="{{ url_for('static', filename='css/history.css') }}">
 </head>
 <body>
+  <svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" style="position:absolute;width:0;height:0;overflow:hidden;">
+    <symbol id="icon-brand" viewBox="0 0 24 24">
+      <path d="M12 3c2.5 2.2 4 4.7 4 7.2 0 2.8-1.9 5.2-4 6.3-2.1-1.1-4-3.5-4-6.3 0-2.5 1.5-5 4-7.2z" />
+      <path d="M9 19c1 .9 2.1 1.4 3 1.4s2-.5 3-1.4" />
+    </symbol>
+    <symbol id="icon-fire" viewBox="0 0 24 24">
+      <path d="M12 3c2.5 2.2 4 4.7 4 7.2 0 2.8-1.9 5.2-4 6.3-2.1-1.1-4-3.5-4-6.3 0-2.5 1.5-5 4-7.2z" />
+      <path d="M9 19c1 .9 2.1 1.4 3 1.4s2-.5 3-1.4" />
+    </symbol>
+    <symbol id="icon-spark" viewBox="0 0 24 24">
+      <line x1="12" y1="3" x2="12" y2="7" />
+      <line x1="12" y1="17" x2="12" y2="21" />
+      <line x1="3" y1="12" x2="7" y2="12" />
+      <line x1="17" y1="12" x2="21" y2="12" />
+      <line x1="5.5" y1="5.5" x2="8" y2="8" />
+      <line x1="16" y1="16" x2="18.5" y2="18.5" />
+      <line x1="5.5" y1="18.5" x2="8" y2="16" />
+      <line x1="16" y1="8" x2="18.5" y2="5.5" />
+      <circle cx="12" cy="12" r="3" />
+    </symbol>
+    <symbol id="icon-pulse" viewBox="0 0 24 24">
+      <polyline points="3 12 7 12 10 5 14 19 17 12 21 12" />
+    </symbol>
+    <symbol id="icon-target" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" />
+      <circle cx="12" cy="12" r="5" />
+      <circle cx="12" cy="12" r="1" />
+    </symbol>
+    <symbol id="icon-stove" viewBox="0 0 24 24">
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <circle cx="8" cy="10" r="2" />
+      <circle cx="16" cy="10" r="2" />
+      <line x1="6" y1="16" x2="18" y2="16" />
+    </symbol>
+    <symbol id="icon-candle" viewBox="0 0 24 24">
+      <path d="M12 3c1.5 1.3 2.3 2.6 2.3 3.9 0 1.6-1.1 3-2.3 3.6-1.2-.6-2.3-2-2.3-3.6 0-1.3.8-2.6 2.3-3.9z" />
+      <rect x="9" y="11" width="6" height="10" rx="2" />
+    </symbol>
+    <symbol id="icon-person" viewBox="0 0 24 24">
+      <circle cx="12" cy="8" r="3" />
+      <path d="M6 20c0-3.3 2.7-6 6-6s6 2.7 6 6" />
+    </symbol>
+    <symbol id="icon-ruler" viewBox="0 0 24 24">
+      <rect x="3" y="7" width="18" height="10" rx="2" />
+      <line x1="7" y1="9" x2="7" y2="15" />
+      <line x1="11" y1="9" x2="11" y2="13" />
+      <line x1="15" y1="9" x2="15" y2="15" />
+      <line x1="19" y1="9" x2="19" y2="13" />
+    </symbol>
+    <symbol id="icon-alert" viewBox="0 0 24 24">
+      <polygon points="12 3 22 19 2 19" />
+      <line x1="12" y1="8" x2="12" y2="13" />
+      <circle cx="12" cy="16" r="1" />
+    </symbol>
+    <symbol id="icon-warning" viewBox="0 0 24 24">
+      <polygon points="12 3 22 19 2 19" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <circle cx="12" cy="16" r="1" />
+    </symbol>
+    <symbol id="icon-critical" viewBox="0 0 24 24">
+      <path d="M8 3h8l5 5v8l-5 5H8l-5-5V8z" />
+      <line x1="12" y1="8" x2="12" y2="13" />
+      <circle cx="12" cy="16" r="1" />
+    </symbol>
+    <symbol id="icon-bolt" viewBox="0 0 24 24">
+      <polyline points="13 2 3 14 11 14 9 22 21 10 13 10 13 2" />
+    </symbol>
+    <symbol id="icon-bell" viewBox="0 0 24 24">
+      <path d="M18 8a6 6 0 10-12 0c0 7-3 7-3 7h18s-3 0-3-7" />
+      <path d="M13.7 21a2 2 0 01-3.4 0" />
+    </symbol>
+    <symbol id="icon-thermal" viewBox="0 0 24 24">
+      <rect x="10" y="3" width="4" height="12" rx="2" />
+      <circle cx="12" cy="19" r="4" />
+      <line x1="12" y1="7" x2="12" y2="15" />
+    </symbol>
+    <symbol id="icon-calendar" viewBox="0 0 24 24">
+      <rect x="3" y="4" width="18" height="17" rx="2" />
+      <line x1="8" y1="2.5" x2="8" y2="6" />
+      <line x1="16" y1="2.5" x2="16" y2="6" />
+      <line x1="3" y1="9" x2="21" y2="9" />
+    </symbol>
+  </svg>
   <div class="history-overlay">
     <!-- <div class="history-title">HISTORY</div> -->
 
     <header>
       <div class="header-container">
         <div class="header-left">
-          <div class="header-logo">🔥</div>
+          <div class="header-logo"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-brand" /></svg></div>
           <div class="header-title-section">
             <h1 class="header-title">PYROSENSE</h1>
             <p class="header-subtitle">Advanced Fire Detection System - Python Edition</p>
@@ -90,7 +169,7 @@ HTML_TEMPLATE = """
 
         <div class="header-center">
           <nav class="main-nav">
-            <a href="http://localhost:5002" class="nav-link" id="navDashboard">Dashboard</a>
+            <a href="http://192.168.1.110:5002" class="nav-link" id="navDashboard">Dashboard</a>
             <span class="nav-sep" aria-hidden="true"></span>
             <a href="#" class="nav-link active" id="navHistory">History</a>
           </nav>
@@ -99,105 +178,13 @@ HTML_TEMPLATE = """
         <div class="header-right">
           <span class="badge python-badge">Made with Python Flask</span>
           <!-- REMOVED: old right-side back button in favor of centered nav -->
-          <!-- <a href="http://localhost:5002" class="dashboard-button">🏠 Back to Dashboard</a> -->
+          <!-- <a href="http://192.168.1.110:5002" class="dashboard-button">?? Back to Dashboard</a> -->
         </div>
       </div>
     </header>
 
     <main>
-      <!-- Stats Section -->
-    <div class="stats-container">
-      <div class="stat-card">
-        <div class="stat-icon">🔥</div>
-        <div class="stat-value">{{ stats.total_fires }}</div>
-        <div class="stat-label">Total Fire Events</div>
-      </div>
-      
-      <div class="stat-card">
-        <div class="stat-icon">🌡️</div>
-        <div class="stat-value">{{ stats.avg_temperature }}°C</div>
-        <div class="stat-label">Average Temperature</div>
-      </div>
-      
-      <div class="stat-card">
-        <div class="stat-icon">⚠️</div>
-        <div class="stat-value">{{ stats.total_alerts }}</div>
-        <div class="stat-label">Total Alerts</div>
-      </div>
-      
-      <div class="stat-card">
-        <div class="stat-icon">⏱️</div>
-        <div class="stat-value">{{ stats.uptime }}%</div>
-        <div class="stat-label">System Uptime</div>
-      </div>
-    </div>
-    
-    <!-- Filters Section -->
-    <div class="filters-container">
-      <div class="filter-card">
-        <div class="filter-title">
-          <span class="filter-icon">📅</span>
-          <span>Select Date Range</span>
-        </div>
-        <div class="date-range-inputs">
-          <div class="date-input-group">               v
-            <label class="date-input-label">Start Date</label>
-            <input type="text" class="date-input" id="startDate" placeholder="📅 Start Date" readonly>
-          </div>
-          <div class="date-input-group">
-            <label class="date-input-label">End Date</label>
-            <input type="text" class="date-input" id="endDate" placeholder="📅 End Date" readonly>
-          </div>
-        </div>
-      </div>
-      
-      <div class="filter-card">
-        <div class="filter-title">
-          <span class="filter-icon">🌡️</span>
-          <span>Temperature Range</span>
-        </div>
-        <div class="temp-range-group">
-          <label class="temp-range-label" for="minTemperature">Min Temperature (°C)</label>
-          <input type="number" class="temp-range-input" id="minTemperature" placeholder="Min °C" min="0" max="100" step="1">
-          <label class="temp-range-label" for="maxTemperature">Max Temperature (°C)</label>
-          <input type="number" class="temp-range-input" id="maxTemperature" placeholder="Max °C" min="0" max="100" step="1">
-        </div>
-      </div>
-      
-      <div class="filter-card">
-        <div class="filter-title">
-          <span class="filter-icon">🚨</span>
-          <span>Alert Level</span>
-        </div>
-        <div class="custom-dropdown" id="alertLevelDropdown">
-          <button class="dropdown-toggle" type="button" id="alertLevelButton">
-            <span id="alertLevelText">Select Alert Level</span>
-          </button>
-          <div class="dropdown-menu" id="alertLevelMenu">
-            <button class="dropdown-item" type="button" data-value="low">Low</button>
-            <button class="dropdown-item" type="button" data-value="medium">Medium</button>
-            <button class="dropdown-item" type="button" data-value="high">High</button>
-          </div>
-        </div>
-      </div>
-      
-      <div class="filter-card">
-        <div class="filter-title">
-          <span class="filter-icon">🔥</span>
-          <span>Fire Detection</span>
-        </div>
-        <div class="custom-dropdown" id="fireDetectionDropdown">
-          <button class="dropdown-toggle" type="button" id="fireDetectionButton">
-            <span id="fireDetectionText">Select Fire Detection</span>
-          </button>
-          <div class="dropdown-menu" id="fireDetectionMenu">
-            <button class="dropdown-item" type="button" data-value="yes">Detected</button>
-            <button class="dropdown-item" type="button" data-value="no">Not Detected</button>
-          </div>
-        </div>
-      </div>
-    </div>
-    
+       
     <!-- Action Buttons -->
     <div class="actions-container">
       <button class="action-button" id="refreshData">
@@ -209,15 +196,12 @@ HTML_TEMPLATE = """
       <button class="action-button green" id="exportJson">
         <span>Export JSON</span>
       </button>
-      <button class="action-button gray" id="clearFilters">
-        <span>Clear Filters</span>
-      </button>
-      <button class="action-button" id="generateReport">
+         <button class="action-button" id="generateReport">
         <span>Generate Report</span>
       </button>
     </div>
     
-    <!-- Records Table -->
+    <!-- Records Table with fire size column -->
     <div class="records-card">
       <div class="records-header">
         <h2 class="records-title">Historical Fire Detection Records</h2>
@@ -229,40 +213,33 @@ HTML_TEMPLATE = """
           <tr>
             <th>Timestamp</th>
             <th>Temperature</th>
-            <th>Fire Detected</th>
             <th>Alert Level</th>
-            <th>Location</th>
-            <th>Confidence</th>
-            <th>Camera Status</th>
-            <th>Thermal Status</th>
+            <th>Status</th>
           </tr>
         </thead>
         <tbody>
-          {% for record in records %}
-          <tr>
-            <td>{{ record.timestamp }}</td>
-            <td>{{ record.temperature }}°C</td>
-            <td>{{ record.fire_detected }}</td>
-            <td>{{ record.alert_level }}</td>
-            <td>{{ record.location }}</td>
-            <td>{{ record.confidence }}%</td>
-            <td>
-              {% if record.camera_status == 'Online' %}
-                <span class="status-text ok">{{ record.camera_status }}</span>
-              {% else %}
-                <span class="status-text offline">{{ record.camera_status }}</span>
-              {% endif %}
-            </td>
-            <td>
-              {% if record.thermal_status == 'OK' %}
-                <span class="status-text ok">{{ record.thermal_status }}</span>
-              {% else %}
-                <span class="status-text offline">{{ record.thermal_status }}</span>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
+{% for record in records %}
+<tr>
+  <td>{{ record.timestamp }}</td>
+  <td>{{ record.temperature }}°C</td>
+  <td>{{ record.alert_level }}</td>
+
+  <td>
+    <span class="alert-badge
+      {% if record.status == 'Fire Detected' %}
+        fire_detected
+      {% elif record.status == 'Warning' %}
+        warning
+      {% else %}
+        normal
+      {% endif %}">
+      {{ record.status }}
+    </span>
+  </td>
+
+</tr>
+{% endfor %}
+</tbody>
       </table>
     </div>
     
@@ -270,7 +247,7 @@ HTML_TEMPLATE = """
     <div class="pagination">
       {% if total_pages > 1 %}
         {% if current_page > 1 %}
-          <a class="pagination-button" href="?page={{ current_page - 1 }}">←</a>
+          <a class="pagination-button" href="?page={{ current_page - 1 }}">?</a>
         {% endif %}
         
         {% for page_num in range(1, total_pages + 1) %}
@@ -279,28 +256,30 @@ HTML_TEMPLATE = """
           {% elif page_num == 1 or page_num == total_pages or (page_num >= current_page - 1 and page_num <= current_page + 1) %}
             <a class="pagination-button" href="?page={{ page_num }}">{{ page_num }}</a>
           {% elif page_num == current_page - 2 or page_num == current_page + 2 %}
-            <span class="pagination-button">...</span>
+            <form class="pagination-form" method="get" action="">
+              <input class="pagination-input" type="number" name="page" min="1" max="{{ total_pages }}" placeholder="..." aria-label="Jump to page">
+            </form>
           {% endif %}
         {% endfor %}
         
         {% if current_page < total_pages %}
-          <a class="pagination-button" href="?page={{ current_page + 1 }}">→</a>
+          <a class="pagination-button" href="?page={{ current_page + 1 }}">?</a>
         {% endif %}
       {% endif %}
     </div>
   </main>
   
   <footer>
-    PyroSense 2025 © All rights reserved - Python Flask Edition
+    PyroSense 2025 ÃÂÃÂÃÂÃÂ© All rights reserved - Python Flask Edition
   </footer>
 
   <!-- MODAL CALENDAR POPUP - FIXED VERSION -->
   <div class="calendar-modal-overlay" id="calendarOverlay">
     <div class="calendar-modal" id="calendarModal">
       <div class="calendar-header">
-        <h3 class="calendar-title">📅 Select Date Range</h3>
+        <h3 class="calendar-title"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-calendar" /></svg>Select Date Range</h3>
         <p class="calendar-subtitle">Choose start and end dates for filtering</p>
-        <button class="calendar-close" id="closeCalendar" type="button">×</button>
+        <button class="calendar-close" id="closeCalendar" type="button">ÃÂÃÂÃÂ¢ÃÂÃÂ</button>
       </div>
       
       <div class="calendar-body">
@@ -312,11 +291,11 @@ HTML_TEMPLATE = """
         <!-- Date Input Display -->
         <div class="date-selection-inputs">
           <div class="date-input-group">
-            <div class="date-input-label">📅 Start Date</div>
+            <div class="date-input-label"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-calendar" /></svg>Start Date</div>
             <div class="date-input-field" id="startDateDisplay">Not selected</div>
           </div>
           <div class="date-input-group">
-            <div class="date-input-label">📅 End Date</div>
+            <div class="date-input-label"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-calendar" /></svg>End Date</div>
             <div class="date-input-field" id="endDateDisplay">Not selected</div>
           </div>
         </div>
@@ -327,9 +306,9 @@ HTML_TEMPLATE = """
         </div>
         
         <div class="month-navigation">
-          <button class="month-nav-btn" id="prevMonth" type="button">‹</button>
+          <button class="month-nav-btn" id="prevMonth" type="button">ÃÂÃÂÃÂ¢ÃÂÃÂ¹</button>
           <div class="current-month" id="currentMonthYear">January 2025</div>
-          <button class="month-nav-btn" id="nextMonth" type="button">›</button>
+          <button class="month-nav-btn" id="nextMonth" type="button">ÃÂÃÂÃÂ¢ÃÂÃÂº</button>
         </div>
         
         <table class="calendar-grid">
@@ -355,7 +334,7 @@ HTML_TEMPLATE = """
       <div class="calendar-footer">
         <div class="selected-range" id="selectedRange">No dates selected</div>
         <div class="calendar-actions">
-          <button class="calendar-btn today" id="todayBtn" type="button">📅 Today</button>
+          <button class="calendar-btn today" id="todayBtn" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-calendar" /></svg>Today</button>
           <button class="calendar-btn cancel" id="cancelBtn" type="button">Cancel</button>
           <button class="calendar-btn apply" id="applyBtn" type="button">Apply Range</button>
         </div>
@@ -606,7 +585,7 @@ HTML_TEMPLATE = """
         // Always lock body scroll at the very start
         lockBodyScroll();
 
-        console.log('🎬 Starting calendar show animation...');
+        console.log('?? Starting calendar show animation...');
         calendarOverlay.style.display = 'flex';
         calendarOverlay.style.visibility = 'visible';
         calendarOverlay.classList.remove('show');
@@ -617,7 +596,7 @@ HTML_TEMPLATE = """
         // Trigger animation
         setTimeout(() => {
           calendarOverlay.classList.add('show');
-          console.log('✨ Calendar animation started');
+          console.log('? Calendar animation started');
         }, 10);
 
         generateCalendar(currentDate);
@@ -626,7 +605,7 @@ HTML_TEMPLATE = """
       }
 
       function hideCalendar() {
-        console.log('🎬 Starting calendar hide animation...');
+        console.log('?? Starting calendar hide animation...');
         
         // Start fade out animation
         calendarOverlay.classList.remove('show');
@@ -996,72 +975,38 @@ HTML_TEMPLATE = """
 
     // Pagination: using server-side anchors (href="?page=N"), no JS click handler required.
 
+    // Preserve scroll position across actions and pagination
+    (function(){
+      const key = 'pyrosense_history_scroll_y';
+      const saved = sessionStorage.getItem(key);
+      if (saved !== null) {
+        window.scrollTo(0, parseInt(saved, 10));
+        sessionStorage.removeItem(key);
+      }
+
+      const saveScroll = () => {
+        sessionStorage.setItem(key, String(window.scrollY || 0));
+      };
+
+      window.addEventListener('beforeunload', saveScroll);
+
+      document.querySelectorAll('.action-button').forEach(btn => {
+        btn.addEventListener('click', saveScroll);
+      });
+
+      document.querySelectorAll('.pagination-button').forEach(btn => {
+        btn.addEventListener('click', saveScroll);
+      });
+
+      document.querySelectorAll('.pagination-form').forEach(form => {
+        form.addEventListener('submit', saveScroll);
+      });
+    })();
+
   </script>
 </body>
 </html>
 """
-
-def calculate_statistics(data):
-    """Calculate statistics from historical data"""
-    if not data:
-        return {
-            'total_fires': 0,
-            'avg_temperature': 0,
-            'total_alerts': 0,
-            'uptime': 0
-        }
-    
-    total_fires = sum(1 for record in data if record['fire_detected'])
-    avg_temperature = round(sum(record['temperature'] for record in data) / len(data), 1)
-    total_alerts = sum(1 for record in data if record['alert_level'] != 'None')
-    
-    # Calculate uptime (percentage of records where all systems are online)
-    online_records = sum(1 for record in data 
-                        if record['camera_status'] == 'Online' and record['thermal_status'] == 'OK')
-    uptime = round((online_records / len(data)) * 100, 1) if data else 0
-    
-    return {
-        'total_fires': total_fires,
-        'avg_temperature': avg_temperature,
-        'total_alerts': total_alerts,
-        'uptime': uptime
-    }
-
-def filter_data(data, filters):
-    """Apply filters to historical data"""
-    filtered_data = data.copy()
-    
-    # Date range filter
-    if filters.get('start_date'):
-        start_date = datetime.fromisoformat(filters['start_date'])
-        filtered_data = [r for r in filtered_data 
-                        if datetime.fromisoformat(r['timestamp']) >= start_date]
-    
-    if filters.get('end_date'):
-        end_date = datetime.fromisoformat(filters['end_date'])
-        filtered_data = [r for r in filtered_data 
-                        if datetime.fromisoformat(r['timestamp']) <= end_date]
-    
-    # Temperature range filter
-    if filters.get('min_temp'):
-        min_temp = float(filters['min_temp'])
-        filtered_data = [r for r in filtered_data if r['temperature'] >= min_temp]
-    
-    if filters.get('max_temp'):
-        max_temp = float(filters['max_temp'])
-        filtered_data = [r for r in filtered_data if r['temperature'] <= max_temp]
-    
-    # Alert level filter
-    if filters.get('alert_level'):
-        alert_level = filters['alert_level']
-        filtered_data = [r for r in filtered_data if r['alert_level'] == alert_level]
-    
-    # Fire detection filter
-    if filters.get('fire_detected'):
-        fire_detected = filters['fire_detected'].lower() == 'true'
-        filtered_data = [r for r in filtered_data if r['fire_detected'] == fire_detected]
-    
-    return filtered_data
 
 @app.route('/')
 def root():
@@ -1070,14 +1015,41 @@ def root():
         # If no user in session, show a simple login prompt
         return render_template_string("""
             <html>
-                <head><title>PyroSense History - Authentication Required</title></head>
-                <body style="background: #121212; color: white; text-align: center; padding-top: 100px; font-family: Arial;">
+              <head>
+                <title>PyroSense History - Authentication Required</title>
+                <style>
+                  body {
+                    background: #121212;
+                    color: white;
+                    text-align: center;
+                    padding-top: 100px;
+                    font-family: Arial, sans-serif;
+                  }
+                  .login-link {
+                    color: #ffffff;
+                    text-decoration: none;
+                    padding: 10px 20px;
+                    border: 1px solid #ffffff;
+                    border-radius: 5px;
+                    display: inline-block;
+                    transition: background 0.2s ease, color 0.2s ease;
+                  }
+                  .login-link:hover {
+                    background: #ffffff;
+                    color: #000000;
+                  }
+                </style>
+              </head>
+              <body>
                     <h1>Authentication Required</h1>
                     <p>Please log in through the PyroSense Login Portal</p>
-                    <p><a href="http://localhost:5000/login" style="color: #f77f00; text-decoration: none; padding: 10px 20px; border: 1px solid #f77f00; border-radius: 5px;">Go to Login</a></p>
+                <p><a href="http://localhost:5000/login" class="login-link">Go to Login</a></p>
                 </body>
             </html>
         """)
+    
+    # UPDATED: Generate fresh data on each page load
+    historical_data = get_logs_from_db()
     
     # Server-side pagination
     try:
@@ -1116,7 +1088,10 @@ def get_history():
     # Check if user is authenticated
     if not session.get('user'):
         return jsonify({'error': 'Authentication required'}), 401
-        
+    
+    # UPDATED: Generate fresh data for API calls too
+    historical_data = get_logs_from_db()
+    
     # Get filter parameters
     filters = {
         'start_date': request.args.get('start_date'),
@@ -1163,7 +1138,10 @@ def export_csv():
     # Check if user is authenticated
     if not session.get('user'):
         return jsonify({'error': 'Authentication required'}), 401
-        
+    
+    # UPDATED: Generate fresh data for exports
+    historical_data = get_logs_from_db()
+    
     # Get filter parameters (same as history endpoint)
     filters = {k: v for k, v in request.args.items() if v}
     filtered_data = filter_data(historical_data, filters)
@@ -1204,7 +1182,10 @@ def export_json():
     # Check if user is authenticated
     if not session.get('user'):
         return jsonify({'error': 'Authentication required'}), 401
-        
+    
+    # UPDATED: Generate fresh data for exports
+    historical_data = get_logs_from_db()
+    
     # Get filter parameters (same as history endpoint)
     filters = {k: v for k, v in request.args.items() if v}
     filtered_data = filter_data(historical_data, filters)
@@ -1237,9 +1218,11 @@ def get_statistics():
     # Check if user is authenticated
     if not session.get('user'):
         return jsonify({'error': 'Authentication required'}), 401
-        
-    stats = calculate_statistics(historical_data);
-    return jsonify(stats);
+    
+    # UPDATED: Generate fresh data for statistics
+    historical_data = get_logs_from_db()
+    stats = calculate_statistics(historical_data)
+    return jsonify(stats)
 
 # --- New: generate a ZIP "report" containing CSV + JSON + summary ---
 @app.route('/api/generate_report')
@@ -1247,6 +1230,9 @@ def api_generate_report():
     """Generate a ZIP report (CSV + JSON + summary) using the same filters as the page (query params)."""
     if not session.get('user'):
         return jsonify({'error': 'Authentication required'}), 401
+
+    # UPDATED: Generate fresh data for reports
+    historical_data = get_logs_from_db()
 
     # collect filters from request.args (same as other endpoints)
     filters = {k: v for k, v in request.args.items() if v}
@@ -1323,19 +1309,19 @@ def goto_dashboard():
     return redirect('http://localhost:5000');
 
 if __name__ == '__main__':
-    print("🐍 Starting PyroSense History Python Flask Application...");
-    print("📊 Historical Data Analysis System - Python Edition");
+    print("?? Starting PyroSense History Python Flask Application...");
+    print("?? Historical Data Analysis System - Python Edition");
     print("=" * 60);
     print("History Page URL: http://localhost:5001");
     print("NOTE: Use the same login credentials as the login portal");
     print("Features:");
-    print("  • 📅 Date range filtering");
-    print("  • 🌡️ Temperature range filtering");
-    print("  • 🚨 Alert level filtering");
-    print("  • 🔥 Fire detection filtering");
-    print("  • 📊 CSV/JSON data export");
-    print("  • 📈 Real-time statistics");
-    print("  • 🐍 Python-powered analytics");
+    print("  ÃÂÃÂÃÂ¢ÃÂÃÂ¢ ?? Date range filtering");
+    print("  ÃÂÃÂÃÂ¢ÃÂÃÂ¢ ??? Temperature range filtering");
+    print("  ÃÂÃÂÃÂ¢ÃÂÃÂ¢ ?? Alert level filtering");
+    print("  ÃÂÃÂÃÂ¢ÃÂÃÂ¢ ?? Fire detection filtering");
+    print("  ÃÂÃÂÃÂ¢ÃÂÃÂ¢ ?? CSV/JSON data export");
+    print("  ÃÂÃÂÃÂ¢ÃÂÃÂ¢ ?? Real-time statistics");
+    print("  ÃÂÃÂÃÂ¢ÃÂÃÂ¢ ?? Python-powered analytics");
     print("To stop server: Press Ctrl+C");
     print("=" * 60);
 

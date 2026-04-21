@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PyroSense Main Runner — starts/stops all apps cleanly.
+PyroSense Main Runner  starts/stops all apps cleanly.
 Press Ctrl+C once to stop all servers.
 """
 
@@ -46,7 +46,7 @@ def hard_kill(p: subprocess.Popen):
 
 
 def main():
-    print("🔥🔥 Starting PyroSense Complete System 🔥🔥")
+    print("???? Starting PyroSense Complete System ????")
     print("=" * 60)
     print("Starting all servers...")
     procs = []
@@ -59,10 +59,10 @@ def main():
     # start admin panel
     procs.append(spawn("admin.py"))
 
-    print("Opening login page in your browser…")
+    print("Opening login page in your browser")
     webbrowser.open("http://localhost:5000")
 
-    print("\n🌟 PyroSense System is Running 🌟")
+    print("\n?? PyroSense System is Running ??")
     print("=" * 60)
     print("Login Server:    http://localhost:5000")
     print("History Server:  http://localhost:5001")
@@ -76,7 +76,7 @@ def main():
         while any(p.poll() is None for p in procs):
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\n⏹ Stopping servers…")
+        print("\n? Stopping servers")
         for p in procs:
             gentle_stop(p)
 
@@ -89,7 +89,7 @@ def main():
         for p in procs:
             hard_kill(p)
 
-        print("✅ All servers stopped.")
+        print("? All servers stopped.")
     finally:
         # absolute cleanup on exit
         for p in procs:

@@ -1,0 +1,5 @@
+classes= 2
+train= /kaggle/working/train.txt
+valid= /kaggle/working/valid.txt
+names= /kaggle/working/obj.names
+backup= /kaggle/working/backup

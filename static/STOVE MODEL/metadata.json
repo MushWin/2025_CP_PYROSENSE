@@ -1,0 +1,19 @@
+{
+  "model": "yolov4-tiny",
+  "num_classes": 2,
+  "classes": [
+    "stove",
+    "candle"
+  ],
+  "weights_files": [
+    "yolov4-tiny-custom_10000.weights",
+    "yolov4-tiny-custom_best.weights",
+    "yolov4-tiny-custom_final.weights",
+    "yolov4-tiny-custom_last.weights"
+  ],
+  "cfg": "yolov4-tiny-custom.cfg",
+  "names": "obj.names",
+  "data": "obj.data",
+  "map_results": "map_results.txt",
+  "exported_at": "2026-01-25 07:58:17"
+}

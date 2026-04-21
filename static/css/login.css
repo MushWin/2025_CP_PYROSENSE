@@ -6,7 +6,7 @@
         
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-image: url('/static/login background.jpg');
+            background-image: url('/static/login bg.png');
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
@@ -27,7 +27,7 @@
             backdrop-filter: blur(10px);
             border-radius: 20px;
             padding: 50px 40px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 20px 40px rgba(224, 11, 11, 0.1);
             width: 100%;
             max-width: 420px;
             text-align: center;
@@ -108,22 +108,58 @@
         
         .login-button {
             width: 100%;
-            padding: 15px;
+            padding: 2px;
             border: none;
             border-radius: 12px;
-            background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 50%, #ffeb3b 100%);
+            background: transparent;
             color: white;
             font-size: 16px;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.3s ease;
+            transition: all 300ms cubic-bezier(.23, 1, 0.32, 1);
             text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .login-button .button-border {
+            position: absolute;
+            inset: 0;
+            border-radius: 12px;
+            background: #000000;
+            opacity: 0;
+            transition: opacity 0.5s ease;
+            pointer-events: none;
+        }
+
+        .login-button .button-inner {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            padding: 13px 15px;
+            border-radius: 10px;
+            background: #000000;
+        }
+
+        .login-button .button-text {
+            display: inline-block;
+            transition: transform 0.5s ease;
         }
         
         .login-button:hover {
             transform: translateY(-2px);
             box-shadow: 0 10px 25px rgba(255, 107, 107, 0.4);
-            background: linear-gradient(135deg, #ff5252 0%, #ff9500 50%, #fdd835 100%);
+        }
+
+        .login-button:hover .button-border {
+            opacity: 1;
+        }
+
+        .login-button:hover .button-text {
+            transform: translateX(2px);
         }
         
         .flash-message {
