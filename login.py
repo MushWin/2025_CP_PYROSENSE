@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PyroSense Login Page - Python Flask Application
-Simple login redirect for demonstration purposes - UI ONLY
+Handles user authentication for the PyroSense web application, including login, password reset, and session management.
 """
 
 from flask import Flask, render_template_string, request, redirect, session, url_for, send_from_directory

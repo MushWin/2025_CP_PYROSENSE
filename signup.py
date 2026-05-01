@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PyroSense Signup Page - Python Flask Application
-Simple signup UI matching the login styling. Inserts hashed password into Users.
+Handles signup functinonality for the Pyrosense web application.
 """
 from flask import Flask, render_template_string, request, redirect, url_for
 import os
